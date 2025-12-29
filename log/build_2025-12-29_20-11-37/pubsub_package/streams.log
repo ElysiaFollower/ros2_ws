@@ -1,0 +1,25 @@
+[0.328s] Invoking command in '/home/v2v/Desktop/lessons/_normal/RobotPractice/ros2_ws/pubsub_package': PYTHONPATH=/home/v2v/Desktop/lessons/_normal/RobotPractice/ros2_ws/build/pubsub_package/prefix_override:/usr/lib/python3/dist-packages/colcon_core/task/python/colcon_distutils_commands:/home/v2v/Desktop/lessons/_normal/RobotPractice/ros2_ws/install/pubsub_package/lib/python3.10/site-packages:${PYTHONPATH} /usr/bin/python3 -W ignore:setup.py install is deprecated -W ignore:easy_install command is deprecated setup.py egg_info --egg-base ../build/pubsub_package build --build-base /home/v2v/Desktop/lessons/_normal/RobotPractice/ros2_ws/build/pubsub_package/build install --record /home/v2v/Desktop/lessons/_normal/RobotPractice/ros2_ws/build/pubsub_package/install.log --single-version-externally-managed install_data
+[0.452s] running egg_info
+[0.452s] writing ../build/pubsub_package/pubsub_package.egg-info/PKG-INFO
+[0.452s] writing dependency_links to ../build/pubsub_package/pubsub_package.egg-info/dependency_links.txt
+[0.452s] writing entry points to ../build/pubsub_package/pubsub_package.egg-info/entry_points.txt
+[0.455s] writing requirements to ../build/pubsub_package/pubsub_package.egg-info/requires.txt
+[0.455s] writing top-level names to ../build/pubsub_package/pubsub_package.egg-info/top_level.txt
+[0.456s] reading manifest file '../build/pubsub_package/pubsub_package.egg-info/SOURCES.txt'
+[0.456s] writing manifest file '../build/pubsub_package/pubsub_package.egg-info/SOURCES.txt'
+[0.456s] running build
+[0.456s] running build_py
+[0.456s] copying pubsub_package/global.py -> /home/v2v/Desktop/lessons/_normal/RobotPractice/ros2_ws/build/pubsub_package/build/lib/pubsub_package
+[0.457s] running install
+[0.457s] running install_lib
+[0.458s] copying /home/v2v/Desktop/lessons/_normal/RobotPractice/ros2_ws/build/pubsub_package/build/lib/pubsub_package/global.py -> /home/v2v/Desktop/lessons/_normal/RobotPractice/ros2_ws/install/pubsub_package/lib/python3.10/site-packages/pubsub_package
+[0.458s] byte-compiling /home/v2v/Desktop/lessons/_normal/RobotPractice/ros2_ws/install/pubsub_package/lib/python3.10/site-packages/pubsub_package/global.py to global.cpython-310.pyc
+[0.460s] running install_data
+[0.460s] running install_egg_info
+[0.462s] removing '/home/v2v/Desktop/lessons/_normal/RobotPractice/ros2_ws/install/pubsub_package/lib/python3.10/site-packages/pubsub_package-0.0.0-py3.10.egg-info' (and everything under it)
+[0.462s] Copying ../build/pubsub_package/pubsub_package.egg-info to /home/v2v/Desktop/lessons/_normal/RobotPractice/ros2_ws/install/pubsub_package/lib/python3.10/site-packages/pubsub_package-0.0.0-py3.10.egg-info
+[0.463s] running install_scripts
+[0.475s] Installing global_pub script to /home/v2v/Desktop/lessons/_normal/RobotPractice/ros2_ws/install/pubsub_package/lib/pubsub_package
+[0.475s] Installing local_pub script to /home/v2v/Desktop/lessons/_normal/RobotPractice/ros2_ws/install/pubsub_package/lib/pubsub_package
+[0.475s] writing list of installed files to '/home/v2v/Desktop/lessons/_normal/RobotPractice/ros2_ws/build/pubsub_package/install.log'
+[0.488s] Invoked command in '/home/v2v/Desktop/lessons/_normal/RobotPractice/ros2_ws/pubsub_package' returned '0': PYTHONPATH=/home/v2v/Desktop/lessons/_normal/RobotPractice/ros2_ws/build/pubsub_package/prefix_override:/usr/lib/python3/dist-packages/colcon_core/task/python/colcon_distutils_commands:/home/v2v/Desktop/lessons/_normal/RobotPractice/ros2_ws/install/pubsub_package/lib/python3.10/site-packages:${PYTHONPATH} /usr/bin/python3 -W ignore:setup.py install is deprecated -W ignore:easy_install command is deprecated setup.py egg_info --egg-base ../build/pubsub_package build --build-base /home/v2v/Desktop/lessons/_normal/RobotPractice/ros2_ws/build/pubsub_package/build install --record /home/v2v/Desktop/lessons/_normal/RobotPractice/ros2_ws/build/pubsub_package/install.log --single-version-externally-managed install_data

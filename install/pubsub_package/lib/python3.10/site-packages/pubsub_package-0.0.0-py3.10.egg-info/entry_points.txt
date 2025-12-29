@@ -1,0 +1,4 @@
+[console_scripts]
+global_pub = pubsub_package.global:main
+local_pub = pubsub_package.local:main
+

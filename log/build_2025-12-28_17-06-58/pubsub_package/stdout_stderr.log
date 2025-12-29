@@ -1,0 +1,50 @@
+running egg_info
+creating ../build/pubsub_package/pubsub_package.egg-info
+writing ../build/pubsub_package/pubsub_package.egg-info/PKG-INFO
+writing dependency_links to ../build/pubsub_package/pubsub_package.egg-info/dependency_links.txt
+writing entry points to ../build/pubsub_package/pubsub_package.egg-info/entry_points.txt
+writing requirements to ../build/pubsub_package/pubsub_package.egg-info/requires.txt
+writing top-level names to ../build/pubsub_package/pubsub_package.egg-info/top_level.txt
+writing manifest file '../build/pubsub_package/pubsub_package.egg-info/SOURCES.txt'
+reading manifest file '../build/pubsub_package/pubsub_package.egg-info/SOURCES.txt'
+writing manifest file '../build/pubsub_package/pubsub_package.egg-info/SOURCES.txt'
+running build
+running build_py
+creating /home/v2v/Desktop/lessons/_normal/RobotPractice/ros2_ws/build/pubsub_package/build
+creating /home/v2v/Desktop/lessons/_normal/RobotPractice/ros2_ws/build/pubsub_package/build/lib
+creating /home/v2v/Desktop/lessons/_normal/RobotPractice/ros2_ws/build/pubsub_package/build/lib/pubsub_package
+copying pubsub_package/global.py -> /home/v2v/Desktop/lessons/_normal/RobotPractice/ros2_ws/build/pubsub_package/build/lib/pubsub_package
+copying pubsub_package/local.py -> /home/v2v/Desktop/lessons/_normal/RobotPractice/ros2_ws/build/pubsub_package/build/lib/pubsub_package
+copying pubsub_package/__init__.py -> /home/v2v/Desktop/lessons/_normal/RobotPractice/ros2_ws/build/pubsub_package/build/lib/pubsub_package
+creating /home/v2v/Desktop/lessons/_normal/RobotPractice/ros2_ws/build/pubsub_package/build/lib/pubsub_package/planner
+copying pubsub_package/planner/dwa.py -> /home/v2v/Desktop/lessons/_normal/RobotPractice/ros2_ws/build/pubsub_package/build/lib/pubsub_package/planner
+copying pubsub_package/planner/__init__.py -> /home/v2v/Desktop/lessons/_normal/RobotPractice/ros2_ws/build/pubsub_package/build/lib/pubsub_package/planner
+copying pubsub_package/planner/rrt_star.py -> /home/v2v/Desktop/lessons/_normal/RobotPractice/ros2_ws/build/pubsub_package/build/lib/pubsub_package/planner
+running install
+running install_lib
+creating /home/v2v/Desktop/lessons/_normal/RobotPractice/ros2_ws/install/pubsub_package/lib/python3.10/site-packages/pubsub_package
+copying /home/v2v/Desktop/lessons/_normal/RobotPractice/ros2_ws/build/pubsub_package/build/lib/pubsub_package/global.py -> /home/v2v/Desktop/lessons/_normal/RobotPractice/ros2_ws/install/pubsub_package/lib/python3.10/site-packages/pubsub_package
+copying /home/v2v/Desktop/lessons/_normal/RobotPractice/ros2_ws/build/pubsub_package/build/lib/pubsub_package/local.py -> /home/v2v/Desktop/lessons/_normal/RobotPractice/ros2_ws/install/pubsub_package/lib/python3.10/site-packages/pubsub_package
+creating /home/v2v/Desktop/lessons/_normal/RobotPractice/ros2_ws/install/pubsub_package/lib/python3.10/site-packages/pubsub_package/planner
+copying /home/v2v/Desktop/lessons/_normal/RobotPractice/ros2_ws/build/pubsub_package/build/lib/pubsub_package/planner/dwa.py -> /home/v2v/Desktop/lessons/_normal/RobotPractice/ros2_ws/install/pubsub_package/lib/python3.10/site-packages/pubsub_package/planner
+copying /home/v2v/Desktop/lessons/_normal/RobotPractice/ros2_ws/build/pubsub_package/build/lib/pubsub_package/planner/__init__.py -> /home/v2v/Desktop/lessons/_normal/RobotPractice/ros2_ws/install/pubsub_package/lib/python3.10/site-packages/pubsub_package/planner
+copying /home/v2v/Desktop/lessons/_normal/RobotPractice/ros2_ws/build/pubsub_package/build/lib/pubsub_package/planner/rrt_star.py -> /home/v2v/Desktop/lessons/_normal/RobotPractice/ros2_ws/install/pubsub_package/lib/python3.10/site-packages/pubsub_package/planner
+copying /home/v2v/Desktop/lessons/_normal/RobotPractice/ros2_ws/build/pubsub_package/build/lib/pubsub_package/__init__.py -> /home/v2v/Desktop/lessons/_normal/RobotPractice/ros2_ws/install/pubsub_package/lib/python3.10/site-packages/pubsub_package
+byte-compiling /home/v2v/Desktop/lessons/_normal/RobotPractice/ros2_ws/install/pubsub_package/lib/python3.10/site-packages/pubsub_package/global.py to global.cpython-310.pyc
+byte-compiling /home/v2v/Desktop/lessons/_normal/RobotPractice/ros2_ws/install/pubsub_package/lib/python3.10/site-packages/pubsub_package/local.py to local.cpython-310.pyc
+byte-compiling /home/v2v/Desktop/lessons/_normal/RobotPractice/ros2_ws/install/pubsub_package/lib/python3.10/site-packages/pubsub_package/planner/dwa.py to dwa.cpython-310.pyc
+byte-compiling /home/v2v/Desktop/lessons/_normal/RobotPractice/ros2_ws/install/pubsub_package/lib/python3.10/site-packages/pubsub_package/planner/__init__.py to __init__.cpython-310.pyc
+byte-compiling /home/v2v/Desktop/lessons/_normal/RobotPractice/ros2_ws/install/pubsub_package/lib/python3.10/site-packages/pubsub_package/planner/rrt_star.py to rrt_star.cpython-310.pyc
+byte-compiling /home/v2v/Desktop/lessons/_normal/RobotPractice/ros2_ws/install/pubsub_package/lib/python3.10/site-packages/pubsub_package/__init__.py to __init__.cpython-310.pyc
+running install_data
+creating /home/v2v/Desktop/lessons/_normal/RobotPractice/ros2_ws/install/pubsub_package/share/ament_index
+creating /home/v2v/Desktop/lessons/_normal/RobotPractice/ros2_ws/install/pubsub_package/share/ament_index/resource_index
+creating /home/v2v/Desktop/lessons/_normal/RobotPractice/ros2_ws/install/pubsub_package/share/ament_index/resource_index/packages
+copying resource/pubsub_package -> /home/v2v/Desktop/lessons/_normal/RobotPractice/ros2_ws/install/pubsub_package/share/ament_index/resource_index/packages
+copying package.xml -> /home/v2v/Desktop/lessons/_normal/RobotPractice/ros2_ws/install/pubsub_package/share/pubsub_package
+running install_egg_info
+Copying ../build/pubsub_package/pubsub_package.egg-info to /home/v2v/Desktop/lessons/_normal/RobotPractice/ros2_ws/install/pubsub_package/lib/python3.10/site-packages/pubsub_package-0.0.0-py3.10.egg-info
+running install_scripts
+Installing global_pub script to /home/v2v/Desktop/lessons/_normal/RobotPractice/ros2_ws/install/pubsub_package/lib/pubsub_package
+Installing local_pub script to /home/v2v/Desktop/lessons/_normal/RobotPractice/ros2_ws/install/pubsub_package/lib/pubsub_package
+writing list of installed files to '/home/v2v/Desktop/lessons/_normal/RobotPractice/ros2_ws/build/pubsub_package/install.log'

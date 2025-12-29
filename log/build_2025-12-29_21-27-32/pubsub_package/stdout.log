@@ -1,0 +1,26 @@
+running egg_info
+writing ../build/pubsub_package/pubsub_package.egg-info/PKG-INFO
+writing dependency_links to ../build/pubsub_package/pubsub_package.egg-info/dependency_links.txt
+writing entry points to ../build/pubsub_package/pubsub_package.egg-info/entry_points.txt
+writing requirements to ../build/pubsub_package/pubsub_package.egg-info/requires.txt
+writing top-level names to ../build/pubsub_package/pubsub_package.egg-info/top_level.txt
+reading manifest file '../build/pubsub_package/pubsub_package.egg-info/SOURCES.txt'
+writing manifest file '../build/pubsub_package/pubsub_package.egg-info/SOURCES.txt'
+running build
+running build_py
+copying pubsub_package/local.py -> /home/v2v/Desktop/lessons/_normal/RobotPractice/ros2_ws/build/pubsub_package/build/lib/pubsub_package
+copying pubsub_package/planner/dwa.py -> /home/v2v/Desktop/lessons/_normal/RobotPractice/ros2_ws/build/pubsub_package/build/lib/pubsub_package/planner
+running install
+running install_lib
+copying /home/v2v/Desktop/lessons/_normal/RobotPractice/ros2_ws/build/pubsub_package/build/lib/pubsub_package/local.py -> /home/v2v/Desktop/lessons/_normal/RobotPractice/ros2_ws/install/pubsub_package/lib/python3.10/site-packages/pubsub_package
+copying /home/v2v/Desktop/lessons/_normal/RobotPractice/ros2_ws/build/pubsub_package/build/lib/pubsub_package/planner/dwa.py -> /home/v2v/Desktop/lessons/_normal/RobotPractice/ros2_ws/install/pubsub_package/lib/python3.10/site-packages/pubsub_package/planner
+byte-compiling /home/v2v/Desktop/lessons/_normal/RobotPractice/ros2_ws/install/pubsub_package/lib/python3.10/site-packages/pubsub_package/local.py to local.cpython-310.pyc
+byte-compiling /home/v2v/Desktop/lessons/_normal/RobotPractice/ros2_ws/install/pubsub_package/lib/python3.10/site-packages/pubsub_package/planner/dwa.py to dwa.cpython-310.pyc
+running install_data
+running install_egg_info
+removing '/home/v2v/Desktop/lessons/_normal/RobotPractice/ros2_ws/install/pubsub_package/lib/python3.10/site-packages/pubsub_package-0.0.0-py3.10.egg-info' (and everything under it)
+Copying ../build/pubsub_package/pubsub_package.egg-info to /home/v2v/Desktop/lessons/_normal/RobotPractice/ros2_ws/install/pubsub_package/lib/python3.10/site-packages/pubsub_package-0.0.0-py3.10.egg-info
+running install_scripts
+Installing global_pub script to /home/v2v/Desktop/lessons/_normal/RobotPractice/ros2_ws/install/pubsub_package/lib/pubsub_package
+Installing local_pub script to /home/v2v/Desktop/lessons/_normal/RobotPractice/ros2_ws/install/pubsub_package/lib/pubsub_package
+writing list of installed files to '/home/v2v/Desktop/lessons/_normal/RobotPractice/ros2_ws/build/pubsub_package/install.log'
