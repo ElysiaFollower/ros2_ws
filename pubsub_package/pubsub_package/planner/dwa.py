@@ -9,6 +9,7 @@ avoidance, and speed optimization.
 
 import math
 import numpy as np
+from typing import List
 
 
 class DWA:
@@ -27,15 +28,20 @@ class DWA:
         self.max_yawrate = 1.0  # Maximum angular velocity (rad/s)
         self.max_accel = 0.2  # Maximum linear acceleration (m/s^2)
         self.max_dyawrate = 2.0  # Maximum angular acceleration (rad/s^2)
-        self.v_reso = 0.01  # Linear velocity resolution (m/s)
+        self.v_reso = 0.05  # Linear velocity resolution (m/s)
         self.yawrate_reso = 0.1  # Angular velocity resolution (rad/s)
+        self.v_samples = 6  # Samples in dynamic window (v)
+        self.w_samples = 12  # Samples in dynamic window (w)
         self.dt = 0.1  # Time step for trajectory simulation (s)
-        self.predict_time = 3.0  # Prediction time horizon (s)
+        self.predict_time = 2.0  # Prediction time horizon (s)
         self.to_goal_cost_gain = 0.15  # Weight for goal distance cost
+        self.path_cost_gain = 1.0  # Weight for path following cost
+        self.heading_cost_gain = 0.2  # Weight for heading alignment cost
         self.speed_cost_gain = 1.0  # Weight for speed cost
         self.obstacle_cost_gain = 1.0  # Weight for obstacle cost
         self.robot_radius = 0.2  # Robot radius for collision checking (m)
         self.obstacle_threshold = 0.5  # Minimum distance to obstacles (m)
+        self.normalize_costs = True  # Normalize critics across candidates
 
     def config(self, max_speed, max_yawrate, base):
         """Configure planner parameters.
@@ -48,6 +54,16 @@ class DWA:
         self.max_speed = max_speed
         self.max_yawrate = max_yawrate
         self.robot_radius = base
+
+    @staticmethod
+    def _normalize(values: List[float]) -> List[float]:
+        if not values:
+            return []
+        vmin = min(values)
+        vmax = max(values)
+        if vmax - vmin < 1e-9:
+            return [0.0 for _ in values]
+        return [(v - vmin) / (vmax - vmin) for v in values]
 
     def motion_model(self, x, u, dt):
         """Calculate next state based on motion model.
@@ -150,24 +166,18 @@ class DWA:
         if len(obstacles) == 0:
             return 0.0
 
-        min_dist = float('inf')
-        for point in trajectory:
-            for obstacle in obstacles:
-                dx = point[0] - obstacle[0]
-                dy = point[1] - obstacle[1]
-                dist = math.sqrt(dx**2 + dy**2)
+        obstacles = np.asarray(obstacles, dtype=float)
+        traj_xy = trajectory[:, :2]  # (T, 2)
 
-                # Check collision
-                if dist <= self.robot_radius:
-                    return float('inf')
+        dx = traj_xy[:, None, 0] - obstacles[None, :, 0]
+        dy = traj_xy[:, None, 1] - obstacles[None, :, 1]
+        dists = np.hypot(dx, dy)
 
-                if dist < min_dist:
-                    min_dist = dist
+        if np.any(dists <= self.robot_radius):
+            return float('inf')
 
-        # Return inverse of minimum distance (closer obstacles = higher cost)
-        if min_dist < self.obstacle_threshold:
-            return 1.0 / min_dist
-        return 0.0
+        min_dist = float(np.min(dists))
+        return 1.0 / max(min_dist, 1e-6)
 
     def calc_speed_cost(self, v):
         """Calculate cost based on speed (prefer higher speeds).
@@ -180,7 +190,29 @@ class DWA:
         """
         return self.max_speed - v
 
-    def planning(self, pose, velocity, goal, points_cloud):
+    def calc_path_cost(self, trajectory, path_points):
+        """Distance from trajectory endpoint to the global path (robot frame)."""
+        if not path_points:
+            return 0.0
+        path = np.asarray(path_points, dtype=float)
+        dx = path[:, 0] - trajectory[-1, 0]
+        dy = path[:, 1] - trajectory[-1, 1]
+        return float(np.min(np.hypot(dx, dy)))
+
+    def calc_heading_cost(self, trajectory, goal):
+        """Heading alignment cost at trajectory endpoint (robot frame)."""
+        dx = goal[0] - trajectory[-1, 0]
+        dy = goal[1] - trajectory[-1, 1]
+        goal_angle = math.atan2(dy, dx)
+        yaw = trajectory[-1, 2]
+        d = goal_angle - yaw
+        while d > math.pi:
+            d -= 2.0 * math.pi
+        while d < -math.pi:
+            d += 2.0 * math.pi
+        return abs(d)
+
+    def planning(self, pose, velocity, goal, points_cloud, path_points=None):
         """Plan optimal velocity command using DWA.
 
         Args:
@@ -188,6 +220,7 @@ class DWA:
             velocity: Current velocity [v, w].
             goal: Goal position [x, y] in robot frame.
             points_cloud: List of obstacle points [(x, y), ...] in robot frame.
+            path_points: Optional list of path points [(x, y), ...] in robot frame.
 
         Returns:
             Tuple of (v, w) representing optimal velocity command.
@@ -228,19 +261,31 @@ class DWA:
 
         # Initialize best cost and velocity
         # Default to a simple goal-seeking behavior if no valid trajectory found
-        best_cost = float('inf')
+        best_cost = float("inf")
         best_u = [fallback_v, fallback_w]
 
         # Search for optimal velocity in dynamic window
         valid_trajectories = 0
-        for test_v in np.arange(v_min, v_max + self.v_reso, self.v_reso):
-            for test_w in np.arange(w_min, w_max + self.yawrate_reso,
-                                    self.yawrate_reso):
+
+        vs = np.linspace(v_min, v_max, max(int(self.v_samples), 2))
+        ws = np.linspace(w_min, w_max, max(int(self.w_samples), 2))
+
+        candidates = []
+        to_goal_costs = []
+        path_costs = []
+        heading_costs = []
+        speed_costs = []
+        obstacle_costs = []
+
+        for test_v in vs:
+            for test_w in ws:
                 # Simulate trajectory
                 trajectory = self.calc_trajectory(pose, test_v, test_w)
 
                 # Calculate costs
                 to_goal_cost = self.calc_to_goal_cost(trajectory, goal)
+                path_cost = self.calc_path_cost(trajectory, path_points)
+                heading_cost = self.calc_heading_cost(trajectory, goal)
                 speed_cost = self.calc_speed_cost(test_v)
                 obstacle_cost = self.calc_obstacle_cost(trajectory, valid_obstacles)
 
@@ -249,13 +294,36 @@ class DWA:
                     continue
 
                 valid_trajectories += 1
+                candidates.append((float(test_v), float(test_w)))
+                to_goal_costs.append(float(to_goal_cost))
+                path_costs.append(float(path_cost))
+                heading_costs.append(float(heading_cost))
+                speed_costs.append(float(speed_cost))
+                obstacle_costs.append(float(obstacle_cost))
 
-                # Total cost
-                final_cost = (self.to_goal_cost_gain * to_goal_cost +
-                              self.speed_cost_gain * speed_cost +
-                              self.obstacle_cost_gain * obstacle_cost)
+        if valid_trajectories > 0:
+            if self.normalize_costs:
+                to_goal_costs_n = self._normalize(to_goal_costs)
+                path_costs_n = self._normalize(path_costs)
+                heading_costs_n = self._normalize(heading_costs)
+                speed_costs_n = self._normalize(speed_costs)
+                obstacle_costs_n = self._normalize(obstacle_costs)
+            else:
+                to_goal_costs_n = to_goal_costs
+                path_costs_n = path_costs
+                heading_costs_n = heading_costs
+                speed_costs_n = speed_costs
+                obstacle_costs_n = obstacle_costs
 
-                # Update best if this is better
+            for i, (test_v, test_w) in enumerate(candidates):
+                final_cost = (
+                    self.to_goal_cost_gain * to_goal_costs_n[i]
+                    + self.path_cost_gain * path_costs_n[i]
+                    + self.heading_cost_gain * heading_costs_n[i]
+                    + self.speed_cost_gain * speed_costs_n[i]
+                    + self.obstacle_cost_gain * obstacle_costs_n[i]
+                )
+
                 if final_cost < best_cost:
                     best_cost = final_cost
                     best_u = [test_v, test_w]
@@ -263,5 +331,11 @@ class DWA:
         # If no valid trajectories found, use fallback
         if valid_trajectories == 0:
             best_u = [fallback_v, fallback_w]
+
+        # If we get stuck with (almost) zero linear velocity, rotate towards goal.
+        if abs(best_u[0]) < 0.01 and goal_dist > 0.1:
+            best_u[0] = 0.0
+            if abs(best_u[1]) < 0.01:
+                best_u[1] = max(min(goal_angle, self.max_yawrate), -self.max_yawrate)
 
         return best_u[0], best_u[1]
