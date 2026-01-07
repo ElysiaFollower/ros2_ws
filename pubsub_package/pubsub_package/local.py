@@ -4,8 +4,7 @@ import rclpy
 from rclpy.node import Node
 from tf2_ros import TransformListener, Buffer
 from tf2_ros import TransformException
-from tf2_geometry_msgs import do_transform_pose,PoseStamped
-from scipy.spatial.transform import Rotation as R  # 从scipy导入Rotation类
+from geometry_msgs.msg import PoseStamped
 import math
 import time
 import numpy as np
@@ -21,11 +20,16 @@ class LocalPlanner(Node):
     def __init__(self, real=None):
         super().__init__('local_planner')
         self.declare_parameter('real', True)
+        self.declare_parameter('map_frame', 'map')
+        self.declare_parameter('base_frame', 'base_footprint')
+        self.declare_parameter('robot_radius', 0.2)
+        self.declare_parameter('safety_dist', 0.05)
         self.declare_parameter('lookahead_dist', 0.8)
         self.declare_parameter('local_path_max_points', 30)
         self.declare_parameter('controller_frequency', 10.0)
         self.declare_parameter('rotate_to_goal', True)
         self.declare_parameter('yaw_goal_tolerance', 0.3)
+        self.declare_parameter('log_interval_sec', 1.0)
         self.declare_parameter('dwa.to_goal_cost_gain', 0.5)
         self.declare_parameter('dwa.path_cost_gain', 2.0)
         self.declare_parameter('dwa.heading_cost_gain', 0.3)
@@ -37,6 +41,8 @@ class LocalPlanner(Node):
         if real is None:
             real = bool(self.get_parameter('real').value)
         self.real = real
+        self.map_frame = str(self.get_parameter('map_frame').value)
+        self.base_frame = str(self.get_parameter('base_frame').value)
         self.x = 0.0
         self.y = 0.0
         self.yaw = 0.0
@@ -45,12 +51,13 @@ class LocalPlanner(Node):
         self.path = Path()
         self.arrive = 0.2  # Standard for arrival
         self.threshold = 1.5  # Laser threshold
-        self.robot_size = 0.2
+        self.robot_size = float(self.get_parameter('robot_radius').value)
+        self.safety_dist = float(self.get_parameter('safety_dist').value)
         self.V_X = 0.5
         self.V_W = 0.5
 
         self.planner = DWA()  # Initialize planner
-        self.planner.config(max_speed=self.V_X, max_yawrate=self.V_W, base=self.robot_size)
+        self.planner.config(max_speed=self.V_X, max_yawrate=self.V_W, base=self.robot_size + self.safety_dist)
         self.planner.to_goal_cost_gain = float(self.get_parameter('dwa.to_goal_cost_gain').value)
         self.planner.path_cost_gain = float(self.get_parameter('dwa.path_cost_gain').value)
         self.planner.heading_cost_gain = float(self.get_parameter('dwa.heading_cost_gain').value)
@@ -78,52 +85,103 @@ class LocalPlanner(Node):
 
         self.traj_pub = self.create_publisher(Path, '/course_agv/trajectory', 1)
         self.traj = Path()
-        self.traj.header.frame_id = 'map'
+        self.traj.header.frame_id = self.map_frame
 
         self.lookahead_dist = float(self.get_parameter('lookahead_dist').value)
         self.local_path_max_points = int(self.get_parameter('local_path_max_points').value)
         self.controller_frequency = float(self.get_parameter('controller_frequency').value)
         self.rotate_to_goal = bool(self.get_parameter('rotate_to_goal').value)
         self.yaw_goal_tolerance = float(self.get_parameter('yaw_goal_tolerance').value)
+        self.log_interval_sec = float(self.get_parameter('log_interval_sec').value)
         self.plan_path_points = []
+
+        self._active = False
+        self._path_version = 0
+        self._last_seen_path_version = -1
+        self._last_log_time = 0.0
 
     def path_callback(self, msg):
         self.lock.acquire()
         self.path = msg
+        self._path_version += 1
+        self._active = True
         self.update_global_pose(init=True)
         self.lock.release()
+
+        goal = msg.poses[-1].pose.position if msg.poses else None
+        if goal is not None:
+            self.get_logger().info(
+                f"Received global_path: poses={len(msg.poses)}, goal=({goal.x:.3f},{goal.y:.3f}), "
+                f"frames(map={self.map_frame}, base={self.base_frame})"
+            )
+
         if self.planning_thread is None:
-            self.planning_thread = Thread(target=self.plan_thread_func)
+            self.planning_thread = Thread(target=self.plan_thread_func, daemon=True)
             self.planning_thread.start()
 
     def plan_thread_func(self):
-        self.get_logger().info("Running planning thread!")
-        while True:
+        self.get_logger().info("Planning loop started (waits for paths and supports multiple goals).")
+        while rclpy.ok():
+            sleep_dt = 1.0 / max(self.controller_frequency, 1.0)
             self.lock.acquire()
-            self.plan_once()
-            self.lock.release()
-            time.sleep(1.0 / max(self.controller_frequency, 1.0))
-            if self.goal_dis < self.arrive:
-                self.lock.acquire()
-                if self.rotate_to_goal and len(self.path.poses) >= 2:
-                    p1 = self.path.poses[-2].pose.position
-                    p2 = self.path.poses[-1].pose.position
-                    yaw_des = math.atan2(p2.y - p1.y, p2.x - p1.x)
-                    yaw_err = normalize_angle(yaw_des - self.yaw)
-                    if abs(yaw_err) > self.yaw_goal_tolerance:
-                        self.vx = 0.0
-                        self.vw = max(min(1.5 * yaw_err, self.V_W), -self.V_W)
-                        self.publish_velocity(zero=False)
-                        self.lock.release()
-                        continue
+            try:
+                if len(self.path.poses) < 2:
+                    self.lock.release()
+                    time.sleep(0.1)
+                    continue
 
-                self.publish_velocity(zero=True)
-                self.lock.release()
-                self.get_logger().info("Arrived at goal!")
-                break
-        self.planning_thread = None
-        self.get_logger().info("Exiting planning thread!")
-        self.get_logger().info("----------------------------------------------------")
+                if self._last_seen_path_version != self._path_version:
+                    self._last_seen_path_version = self._path_version
+                    self.vx = 0.0
+                    self.vw = 0.0
+                    self.get_logger().info("Switched to new path (reset controller state).")
+
+                if self.goal_dis < self.arrive:
+                    if self.rotate_to_goal and len(self.path.poses) >= 2:
+                        p1 = self.path.poses[-2].pose.position
+                        p2 = self.path.poses[-1].pose.position
+                        yaw_des = math.atan2(p2.y - p1.y, p2.x - p1.x)
+                        yaw_err = normalize_angle(yaw_des - self.yaw)
+                        if abs(yaw_err) > self.yaw_goal_tolerance:
+                            self.vx = 0.0
+                            self.vw = max(min(1.5 * yaw_err, self.V_W), -self.V_W)
+                            self.publish_velocity(zero=False)
+                            self.lock.release()
+                            time.sleep(sleep_dt)
+                            continue
+
+                    if self._active:
+                        self.publish_velocity(zero=True)
+                        self._active = False
+                        self.get_logger().info("Arrived at goal; waiting for next global_path...")
+                    self.lock.release()
+                    time.sleep(0.1)
+                    continue
+
+                if not self._active:
+                    self.lock.release()
+                    time.sleep(0.1)
+                    continue
+
+                self.plan_once()
+
+                now = time.time()
+                if now - self._last_log_time >= max(self.log_interval_sec, 0.1):
+                    self._last_log_time = now
+                    ob_n = int(getattr(self, "plan_ob", np.empty((0, 2))).shape[0])
+                    gx, gy = getattr(self, "plan_goal", (float("nan"), float("nan")))
+                    self.get_logger().info(
+                        f"state: x={self.x:.2f} y={self.y:.2f} yaw={self.yaw:.2f} "
+                        f"goal_r=({gx:.2f},{gy:.2f}) dist={self.goal_dis:.2f} "
+                        f"ob={ob_n} cmd(v={self.vx:.2f}, w={self.vw:.2f})"
+                    )
+            except Exception as e:
+                self.get_logger().error(f"Planning loop error: {e}")
+            finally:
+                if self.lock.locked():
+                    self.lock.release()
+            time.sleep(sleep_dt)
+        self.get_logger().info("Planning loop stopped.")
 
     def plan_once(self):
         self.update_global_pose(init=False)
@@ -155,7 +213,7 @@ class LocalPlanner(Node):
                 f"velocity: {velocity}"
             )
         
-        self.get_logger().info(f"v: {self.vx}, w: {self.vw}")
+        self.get_logger().debug(f"cmd: v={self.vx:.3f}, w={self.vw:.3f}")
         self.publish_velocity(zero=False)
 
 
@@ -169,8 +227,8 @@ class LocalPlanner(Node):
 
             # 尝试获取坐标变换
             trans = self.tf_buffer.lookup_transform(
-                'map' , 
-                'base_footprint'              , 
+                self.map_frame,
+                self.base_frame,
                 rclpy.time.Time(),
                 rclpy.duration.Duration(seconds=1.0)  # 超时时间设置为1秒
             )
@@ -179,23 +237,17 @@ class LocalPlanner(Node):
             self.x = trans.transform.translation.x
             self.y = trans.transform.translation.y
 
-            # 使用scipy将四元数转换为欧拉角
-            rotation = R.from_quat([
-                trans.transform.rotation.x,
-                trans.transform.rotation.y,
-                trans.transform.rotation.z,
-                trans.transform.rotation.w
-            ])
-            # 提取欧拉角，单位为弧度
-            roll, pitch, yaw = rotation.as_euler('xyz', degrees=False)
-            self.yaw = yaw  # 这里只需要yaw角度
+            q = trans.transform.rotation
+            siny_cosp = 2.0 * (q.w * q.z + q.x * q.y)
+            cosy_cosp = 1.0 - 2.0 * (q.y * q.y + q.z * q.z)
+            self.yaw = math.atan2(siny_cosp, cosy_cosp)
 
         except TransformException as e:
             # 捕获变换异常并记录错误日志
             self.get_logger().error(f"TF 错误: {e}")
 
         pose = PoseStamped()
-        pose.header.frame_id = 'map'
+        pose.header.frame_id = self.map_frame
         pose.pose.position.x = self.x
         pose.pose.position.y = self.y
         self.traj.poses.append(pose)
@@ -229,7 +281,7 @@ class LocalPlanner(Node):
         self.midpose_pub.publish(goal)
 
         try:
-            lgoal = self.tf_buffer.transform(goal, 'base_footprint')
+            lgoal = self.tf_buffer.transform(goal, self.base_frame)
             self.plan_goal = (lgoal.pose.position.x, lgoal.pose.position.y)
         except Exception as e:
             self.get_logger().error(f"TF transformation error: {e}")
@@ -238,7 +290,7 @@ class LocalPlanner(Node):
         end = min(nearest + max(self.local_path_max_points, 2), len(self.path.poses))
         for i in range(nearest, end):
             try:
-                lp = self.tf_buffer.transform(self.path.poses[i], 'base_footprint')
+                lp = self.tf_buffer.transform(self.path.poses[i], self.base_frame)
                 local_pts.append((lp.pose.position.x, lp.pose.position.y))
             except Exception:
                 break

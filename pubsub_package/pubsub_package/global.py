@@ -6,7 +6,7 @@ from rclpy.node import Node
 from tf2_ros import TransformListener, Buffer
 from nav_msgs.srv import GetMap
 from nav_msgs.msg import Path, OccupancyGrid
-from tf2_geometry_msgs import PoseStamped
+from geometry_msgs.msg import PoseStamped
 
 import numpy as np
 import sys
@@ -19,7 +19,18 @@ from pubsub_package.planner.rrt_star import RRT_star as planner
 class GlobalPlanner(Node):
     def __init__(self):
         super().__init__('global_planner')
-        self.plan_robot_radius = 0.15
+        self.declare_parameter('map_frame', 'map')
+        self.declare_parameter('base_frame', 'base_footprint')
+        self.declare_parameter('log_interval_sec', 1.0)
+        self.declare_parameter('robot_radius', 0.2)
+        self.declare_parameter('inflation_radius', 0.1)
+        self.map_frame = str(self.get_parameter('map_frame').value)
+        self.base_frame = str(self.get_parameter('base_frame').value)
+        self.log_interval_sec = float(self.get_parameter('log_interval_sec').value)
+        self._last_log_time = 0.0
+
+        self.plan_robot_radius = float(self.get_parameter('robot_radius').value)
+        self.inflation_radius = float(self.get_parameter('inflation_radius').value)
         self.plan_ox = []  # obstacle
         self.plan_oy = []
         self.plan_sx = 0.0  # start pose
@@ -60,15 +71,27 @@ class GlobalPlanner(Node):
 
     def map_callback(self, msg):
         self.map = msg
+        now = time.time()
+        if now - self._last_log_time >= max(self.log_interval_sec, 0.1):
+            self._last_log_time = now
+            self.get_logger().info(
+                f"Received /map: size=({msg.info.width}x{msg.info.height}) res={msg.info.resolution:.3f} "
+                f"origin=({msg.info.origin.position.x:.2f},{msg.info.origin.position.y:.2f})"
+            )
 
     def goal_callback(self, msg):
         self.plan_gx = msg.pose.position.x
         self.plan_gy = msg.pose.position.y
-        self.get_logger().info("Received new goal!")
+        self.get_logger().info(
+            f"Received new goal: ({self.plan_gx:.3f},{self.plan_gy:.3f}) frame={msg.header.frame_id or self.map_frame}"
+        )
         self.replan()
 
     def replan(self):
         self.get_logger().info('Replanning...')
+        if not hasattr(self, "map"):
+            self.get_logger().warning("No /map received yet, skipping planning")
+            return
         self.init_planner()
         self.update_global_pose()
 
@@ -86,7 +109,10 @@ class GlobalPlanner(Node):
                 self.plan_ry = np.array(plan_path)[:, 1]
                 self.publish_path()
                 res = True
-                self.get_logger().info("Path found!")
+                self.get_logger().info(
+                    f"Path found: raw_len={len(path)}, published_len={len(self.plan_rx)} "
+                    f"start=({self.plan_sx:.2f},{self.plan_sy:.2f}) goal=({self.plan_gx:.2f},{self.plan_gy:.2f})"
+                )
                 break
             else:
                 self.get_logger().info("Retry...")
@@ -129,6 +155,47 @@ class GlobalPlanner(Node):
         plan_path.append(path[-1])
         return plan_path
 
+    @staticmethod
+    def inflate_obstacles(occ_grid: np.ndarray, radius_cells: int) -> np.ndarray:
+        """Inflate occupancy grid (binary) by a circular radius in cells.
+
+        Args:
+            occ_grid: bool array, True means occupied
+            radius_cells: inflation radius in grid cells
+
+        Returns:
+            Inflated bool array
+        """
+        r = int(max(radius_cells, 0))
+        if r == 0:
+            return occ_grid
+
+        inflated = np.zeros_like(occ_grid, dtype=bool)
+        offsets = []
+        r2 = r * r
+        for dx in range(-r, r + 1):
+            for dy in range(-r, r + 1):
+                if dx * dx + dy * dy <= r2:
+                    offsets.append((dx, dy))
+
+        w, h = occ_grid.shape
+        for dx, dy in offsets:
+            xs_src_start = max(0, -dx)
+            xs_src_end = min(w, w - dx)
+            ys_src_start = max(0, -dy)
+            ys_src_end = min(h, h - dy)
+
+            xs_dst_start = xs_src_start + dx
+            xs_dst_end = xs_src_end + dx
+            ys_dst_start = ys_src_start + dy
+            ys_dst_end = ys_src_end + dy
+
+            inflated[xs_dst_start:xs_dst_end, ys_dst_start:ys_dst_end] |= occ_grid[
+                xs_src_start:xs_src_end, ys_src_start:ys_src_end
+            ]
+
+        return inflated
+
     def init_planner(self):
       
         map_data = np.array(self.map.data).reshape((self.map.info.height, -1)).transpose()  # 实物
@@ -138,19 +205,33 @@ class GlobalPlanner(Node):
         miny = self.map.info.origin.position.y
         maxy = self.map.info.origin.position.y + map_data.shape[1] * self.map.info.resolution
       
-        ox, oy = np.nonzero(map_data != 0)  # 实物
+        resolution = float(self.map.info.resolution)
+        occ = map_data != 0  # treat unknown as occupied for safety
+        inflation_cells = int(math.ceil(max(self.plan_robot_radius + self.inflation_radius, 0.0) / max(resolution, 1e-6)))
+        occ_inflated = self.inflate_obstacles(occ, inflation_cells)
+
+        ox, oy = np.nonzero(occ_inflated)  # 实物
     
         self.plan_ox = ox * self.map.info.resolution + self.map.info.origin.position.x
         self.plan_oy = oy * self.map.info.resolution + self.map.info.origin.position.y
         obstacles = list(zip(self.plan_ox, self.plan_oy))
         obstacles.append((-9999, -9999))
+        self.get_logger().info(
+            f"Planner init: bounds=({minx:.2f},{miny:.2f})-({maxx:.2f},{maxy:.2f}) obstacles={len(obstacles)} "
+            f"robot_radius={self.plan_robot_radius:.2f} inflation={self.inflation_radius:.2f} (cells={inflation_cells})"
+        )
         self.planner = planner(minx=minx, maxx=maxx, miny=miny, maxy=maxy, obstacles=obstacles,
                                robot_size=self.plan_robot_radius, safe_dist=self.map.info.resolution)
 
     def update_global_pose(self):
         try:
           
-            trans = self.tf_buffer.lookup_transform('map', 'base_footprint', rclpy.time.Time(), rclpy.duration.Duration(seconds=4.0))
+            trans = self.tf_buffer.lookup_transform(
+                self.map_frame,
+                self.base_frame,
+                rclpy.time.Time(),
+                rclpy.duration.Duration(seconds=4.0),
+            )
             
             self.plan_sx = trans.transform.translation.x
             self.plan_sy = trans.transform.translation.y
@@ -160,11 +241,11 @@ class GlobalPlanner(Node):
     def publish_path(self):
         path = Path()
         path.header.stamp = rclpy.time.Time().to_msg()
-        path.header.frame_id = 'map'
+        path.header.frame_id = self.map_frame
         for i in range(len(self.plan_rx)):
             pose = PoseStamped()
             pose.header.stamp = rclpy.time.Time().to_msg()
-            pose.header.frame_id = 'map'
+            pose.header.frame_id = self.map_frame
             pose.pose.position.x = self.plan_rx[i]
             pose.pose.position.y = self.plan_ry[i]
             pose.pose.position.z = 0.01
