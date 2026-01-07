@@ -6,7 +6,7 @@ from rclpy.node import Node
 from tf2_ros import TransformListener, Buffer
 from nav_msgs.srv import GetMap
 from nav_msgs.msg import Path, OccupancyGrid
-from tf2_geometry_msgs import PoseStamped
+from geometry_msgs.msg import PoseStamped
 
 import numpy as np
 import sys

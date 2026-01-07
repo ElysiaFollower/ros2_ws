@@ -4,8 +4,7 @@ import rclpy
 from rclpy.node import Node
 from tf2_ros import TransformListener, Buffer
 from tf2_ros import TransformException
-from tf2_geometry_msgs import do_transform_pose,PoseStamped
-from scipy.spatial.transform import Rotation as R  # 从scipy导入Rotation类
+from geometry_msgs.msg import PoseStamped
 import math
 import time
 import numpy as np
@@ -179,16 +178,10 @@ class LocalPlanner(Node):
             self.x = trans.transform.translation.x
             self.y = trans.transform.translation.y
 
-            # 使用scipy将四元数转换为欧拉角
-            rotation = R.from_quat([
-                trans.transform.rotation.x,
-                trans.transform.rotation.y,
-                trans.transform.rotation.z,
-                trans.transform.rotation.w
-            ])
-            # 提取欧拉角，单位为弧度
-            roll, pitch, yaw = rotation.as_euler('xyz', degrees=False)
-            self.yaw = yaw  # 这里只需要yaw角度
+            q = trans.transform.rotation
+            siny_cosp = 2.0 * (q.w * q.z + q.x * q.y)
+            cosy_cosp = 1.0 - 2.0 * (q.y * q.y + q.z * q.z)
+            self.yaw = math.atan2(siny_cosp, cosy_cosp)
 
         except TransformException as e:
             # 捕获变换异常并记录错误日志
