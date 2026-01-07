@@ -1,366 +1,238 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+
 import rclpy
 from rclpy.node import Node
-from tf2_ros import TransformListener, Buffer
-from tf2_ros import TransformException
-
-# 修正：do_transform_pose 可能在某些版本需要显式导入，但 PoseStamped 必须来自 geometry_msgs
-try:
-    from tf2_geometry_msgs import do_transform_pose
-except ImportError:
-    import tf2_geometry_msgs
-
+from rclpy.duration import Duration
+from tf2_ros import TransformListener, Buffer, TransformException
 from geometry_msgs.msg import PoseStamped, Twist, Point
-from scipy.spatial.transform import Rotation as R
-import math
-import time
-import numpy as np
 from nav_msgs.msg import Path
 from sensor_msgs.msg import LaserScan
-from visualization_msgs.msg import Marker # 修正：确保导入 Marker
-from threading import Lock, Thread
+from visualization_msgs.msg import Marker
 
-# Import your own planner
+import math
+import numpy as np
+import threading
+
+# Import Planner
 from pubsub_package.planner.dwa import DWA
 
 class LocalPlanner(Node):
-    def __init__(self, real=None):
+    def __init__(self):
         super().__init__('local_planner')
-        self.declare_parameter('real', True)
-        self.declare_parameter('lookahead_dist', 0.8)
-        self.declare_parameter('local_path_max_points', 30)
-        self.declare_parameter('controller_frequency', 10.0)
-        self.declare_parameter('rotate_to_goal', True)
-        self.declare_parameter('yaw_goal_tolerance', 0.3)
-        # DWA 参数
-        self.declare_parameter('dwa.to_goal_cost_gain', 0.5)
-        self.declare_parameter('dwa.path_cost_gain', 2.0)
-        self.declare_parameter('dwa.heading_cost_gain', 0.3)
-        self.declare_parameter('dwa.obstacle_cost_gain', 1.0)
-        self.declare_parameter('dwa.speed_cost_gain', 0.2)
-        self.declare_parameter('dwa.predict_time', 2.0)
-        self.declare_parameter('dwa.v_samples', 6)
-        self.declare_parameter('dwa.w_samples', 12)
-
-        if real is None:
-            real = bool(self.get_parameter('real').value)
-        self.real = real
         
-        self.x = 0.0
-        self.y = 0.0
-        self.yaw = 0.0
-        self.vx = 0.0
-        self.vw = 0.0
+        # Parameters
+        self.declare_parameter('base_frame', 'base_footprint')
+        self.declare_parameter('laser_frame', 'laser_link') # 重要：知道雷达在哪里
+        self.declare_parameter('control_freq', 10.0)
         
-        self.path = Path()
-        self.arrive = 0.2
-        self.threshold = 1.5
-        self.robot_size = 0.2
-        self.V_X = 0.5
-        self.V_W = 0.5
+        self.base_frame = self.get_parameter('base_frame').value
+        self.laser_frame = self.get_parameter('laser_frame').value
+        self.freq = self.get_parameter('control_freq').value
 
-        # 初始化 DWA
-        self.planner = DWA()
-        self.planner.config(max_speed=self.V_X, max_yawrate=self.V_W, base=self.robot_size)
-        self.planner.to_goal_cost_gain = float(self.get_parameter('dwa.to_goal_cost_gain').value)
-        self.planner.path_cost_gain = float(self.get_parameter('dwa.path_cost_gain').value)
-        self.planner.heading_cost_gain = float(self.get_parameter('dwa.heading_cost_gain').value)
-        self.planner.obstacle_cost_gain = float(self.get_parameter('dwa.obstacle_cost_gain').value)
-        self.planner.speed_cost_gain = float(self.get_parameter('dwa.speed_cost_gain').value)
-        self.planner.predict_time = float(self.get_parameter('dwa.predict_time').value)
-        self.planner.v_samples = int(self.get_parameter('dwa.v_samples').value)
-        self.planner.w_samples = int(self.get_parameter('dwa.w_samples').value)
-
+        # TF
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self)
 
-        self.path_sub = self.create_subscription(Path, '/course_agv/global_path', self.path_callback, 1)
-        self.midpose_pub = self.create_publisher(PoseStamped, '/course_agv/mid_goal', 1)
+        # Subs/Pubs
+        self.path_sub = self.create_subscription(Path, '/course_agv/global_path', self.path_cb, 10)
+        self.scan_sub = self.create_subscription(LaserScan, '/scan', self.scan_cb, 10) # 也可以是 /course_agv/laser/scan
+        self.vel_pub = self.create_publisher(Twist, '/cmd_vel', 10)
+        self.vis_pub = self.create_publisher(Marker, '/local_planner/debug_obs', 10)
+
+        # Logic
+        self.global_path = None
+        self.scan_data = None
+        self.lock = threading.Lock()
         
-        # 新增：发布可视化障碍物点
-        self.marker_pub = self.create_publisher(Marker, '/course_agv/debug/obstacles', 1)
+        self.planner = DWA()
+        self.planner.config(max_speed=0.5, max_yawrate=1.0, base=0.25)
 
-        if self.real:
-            self.laser_sub = self.create_subscription(LaserScan, '/scan', self.laser_callback, 1)
-            self.vel_pub = self.create_publisher(Twist, '/cmd_vel', 1)
-        else:
-            self.laser_sub = self.create_subscription(LaserScan, '/course_agv/laser/scan', self.laser_callback, 1)
-            self.vel_pub = self.create_publisher(Twist, '/course_agv/velocity', 1)
+        # Control Loop
+        self.timer = self.create_timer(1.0/self.freq, self.control_loop)
+        self.get_logger().info("Local Planner Initialized (TF-Aware)")
 
-        self.planning_thread = None
-        self.lock = Lock()
-        self.laser_lock = Lock()
+    def path_cb(self, msg):
+        with self.lock:
+            self.global_path = msg
+            self.get_logger().info("Received Global Path")
 
-        self.traj_pub = self.create_publisher(Path, '/course_agv/trajectory', 1)
-        self.traj = Path()
-        self.traj.header.frame_id = 'map'
+    def scan_cb(self, msg):
+        with self.lock:
+            self.scan_data = msg
 
-        self.lookahead_dist = float(self.get_parameter('lookahead_dist').value)
-        self.local_path_max_points = int(self.get_parameter('local_path_max_points').value)
-        self.controller_frequency = float(self.get_parameter('controller_frequency').value)
-        self.rotate_to_goal = bool(self.get_parameter('rotate_to_goal').value)
-        self.yaw_goal_tolerance = float(self.get_parameter('yaw_goal_tolerance').value)
-        
-        self.plan_path_points = []
-        self.ob = []
-        self.plan_ob = np.array([])
-        # 初始化关键变量，避免未初始化错误
-        self.plan_goal = (1.0, 0.0)  # 默认目标
-        self.goal_dis = float('inf')  # 默认距离为无穷大
-        self.goal_index = 0
-
-    def path_callback(self, msg):
-        self.lock.acquire()
-        self.path = msg
-        self.update_global_pose(init=True)
-        self.lock.release()
-        
-        # 防止重复创建线程
-        if self.planning_thread is None or not self.planning_thread.is_alive():
-            if self.planning_thread is not None:
-                self.planning_thread.join(timeout=0.1)  # 等待旧线程结束
-            self.planning_thread = Thread(target=self.plan_thread_func)
-            self.planning_thread.start()
-
-    def plan_thread_func(self):
-        self.get_logger().info("Running planning thread!")
-        
-        while rclpy.ok():
-            self.lock.acquire()
-            if len(self.path.poses) == 0:
-                self.lock.release()
-                time.sleep(0.1)
-                continue
-                
-            self.plan_once()
-            self.lock.release()
-            
-            time.sleep(1.0 / max(self.controller_frequency, 1.0))
-            
-            if self.goal_dis < self.arrive:
-                self.lock.acquire()
-                if self.rotate_to_goal and len(self.path.poses) >= 2:
-                    p1 = self.path.poses[-2].pose.position
-                    p2 = self.path.poses[-1].pose.position
-                    yaw_des = math.atan2(p2.y - p1.y, p2.x - p1.x)
-                    yaw_err = normalize_angle(yaw_des - self.yaw)
-                    
-                    if abs(yaw_err) > self.yaw_goal_tolerance:
-                        self.vx = 0.0
-                        self.vw = max(min(1.5 * yaw_err, self.V_W), -self.V_W)
-                        self.publish_velocity(zero=False)
-                        self.lock.release()
-                        continue
-
-                self.publish_velocity(zero=True)
-                self.lock.release()
-                self.get_logger().info("Arrived at goal!")
-                break
-                
-        self.planning_thread = None
-        self.get_logger().info("Exiting planning thread!")
-
-    def plan_once(self):
-        # 注意：plan_once 在锁保护下被调用（见 plan_thread_func）
-        self.update_global_pose(init=False)
-        self.update_obstacle()
-        self.publish_obstacles() 
-
-        pose_robot_frame = (0.0, 0.0, 0.0)
-        velocity = (self.vx, self.vw)
-
-        # 确保 plan_goal 已初始化
-        if not hasattr(self, 'plan_goal') or self.plan_goal is None:
-            self.plan_goal = (1.0, 0.0)
-
-        u = self.planner.planning(
-            pose=pose_robot_frame, 
-            velocity=velocity, 
-            goal=self.plan_goal, 
-            points_cloud=self.plan_ob.tolist(),
-            path_points=self.plan_path_points,
-        )
-
-        self.vx = max(min(u[0], self.V_X), -self.V_X)
-        self.vw = max(min(u[1], self.V_W), -self.V_W)
-        
-        self.get_logger().info(f"v: {self.vx:.2f}, w: {self.vw:.2f}")
-        self.publish_velocity(zero=False)
-
-    def publish_obstacles(self):
-        """将 DWA 使用的障碍物点以 Marker 形式发布到 Rviz"""
-        if len(self.plan_ob) == 0:
-            return
-            
-        marker = Marker()
-        marker.header.frame_id = "base_footprint" 
-        marker.header.stamp = self.get_clock().now().to_msg()
-        marker.ns = "dwa_obstacles"
-        marker.id = 0
-        marker.type = Marker.POINTS
-        marker.action = Marker.ADD
-        marker.scale.x = 0.05 
-        marker.scale.y = 0.05
-        marker.color.a = 1.0
-        marker.color.r = 1.0 
-        marker.color.g = 0.0
-        marker.color.b = 0.0
-        
-        for p in self.plan_ob:
-            pt = Point()
-            pt.x = float(p[0])
-            pt.y = float(p[1])
-            pt.z = 0.0
-            marker.points.append(pt)
-            
-        self.marker_pub.publish(marker)
-
-    def update_global_pose(self, init=False):
+    def get_transform(self, target, source):
         try:
-            trans = self.tf_buffer.lookup_transform(
-                'map', 
-                'base_footprint', 
-                rclpy.time.Time(), 
-                rclpy.duration.Duration(seconds=0.1)
-            )
-
-            self.x = trans.transform.translation.x
-            self.y = trans.transform.translation.y
-
-            rotation = R.from_quat([
-                trans.transform.rotation.x,
-                trans.transform.rotation.y,
-                trans.transform.rotation.z,
-                trans.transform.rotation.w
-            ])
-            self.yaw = rotation.as_euler('xyz', degrees=False)[2]
-
+            # Look up latest available transform
+            return self.tf_buffer.lookup_transform(target, source, rclpy.time.Time())
         except TransformException:
-            self.get_logger().debug("TF lookup failed, using previous pose")
-            # 即使TF失败，也要确保后续代码能安全执行
-            # 使用默认值或保持之前的值（已在初始化时设置）
-            if not hasattr(self, 'x') or self.x == 0.0:
-                self.x = 0.0
-                self.y = 0.0
-                self.yaw = 0.0
-            # 继续执行后续逻辑，确保所有变量都被初始化
+            return None
 
-        pose = PoseStamped()
-        pose.header.frame_id = 'map'
-        pose.header.stamp = self.get_clock().now().to_msg()
-        pose.pose.position.x = self.x
-        pose.pose.position.y = self.y
-        pose.pose.orientation.w = 1.0 
-        
-        self.traj.header.stamp = self.get_clock().now().to_msg()
-        self.traj.poses.append(pose)
-        
-        if len(self.traj.poses) > 1000:
-            self.traj.poses.pop(0)
+    def control_loop(self):
+        # 1. Check prerequisites
+        if self.global_path is None or len(self.global_path.poses) == 0:
+            return # No path, do nothing (idle)
             
-        self.traj_pub.publish(self.traj)
-
-        if init:
-            self.goal_index = 0
-            self.traj.poses = [] 
-
-        if len(self.path.poses) < 2:
+        if self.scan_data is None:
+            self.get_logger().warn("No scan data", throttle_duration_sec=2.0)
+            self.publish_stop()
             return
 
-        pts = np.array(
-            [[p.pose.position.x, p.pose.position.y] for p in self.path.poses],
-            dtype=float,
+        # 2. Get Robot Pose in Map (to find local goal)
+        t_map_base = self.get_transform('map', self.base_frame)
+        if not t_map_base:
+            self.get_logger().warn("TF map->base missing")
+            return
+        
+        rx = t_map_base.transform.translation.x
+        ry = t_map_base.transform.translation.y
+        ryaw = self.quat_to_yaw(t_map_base.transform.rotation)
+
+        # 3. Find Lookahead Goal on Global Path
+        goal_x, goal_y = self.get_local_goal(rx, ry, lookahead=1.0)
+        
+        # Transform Goal to Robot Frame (required for DWA)
+        # Coordinate shift: (gx - rx, gy - ry) then rotate by -ryaw
+        dx = goal_x - rx
+        dy = goal_y - ry
+        local_gx = dx * math.cos(ryaw) + dy * math.sin(ryaw)
+        local_gy = -dx * math.sin(ryaw) + dy * math.cos(ryaw)
+
+        # 4. Process Obstacles (CRITICAL: Transform Scan to Base Frame)
+        obstacles = self.process_scan_to_base_frame(self.scan_data)
+        
+        # 5. Plan
+        # Current velocity assumption (could verify from odom)
+        v_curr = 0.0 # simplified
+        w_curr = 0.0
+        
+        v, w = self.planner.planning(
+            pose=[0,0,0], # Robot is origin of itself
+            velocity=[v_curr, w_curr],
+            goal=[local_gx, local_gy],
+            obstacles=obstacles
         )
-        d2 = (pts[:, 0] - self.x) ** 2 + (pts[:, 1] - self.y) ** 2
-        nearest = int(np.argmin(d2))
-
-        goal_index = min(nearest + 1, len(self.path.poses) - 1)
-        acc = 0.0
-        for i in range(nearest, len(self.path.poses) - 1):
-            seg = math.hypot(pts[i + 1, 0] - pts[i, 0], pts[i + 1, 1] - pts[i, 1])
-            acc += seg
-            if acc >= self.lookahead_dist:
-                goal_index = i + 1
-                break
-
-        self.goal_index = goal_index
-        goal = self.path.poses[self.goal_index]
-        self.midpose_pub.publish(goal)
-
-        try:
-            lgoal = self.tf_buffer.transform(goal, 'base_footprint')
-            self.plan_goal = (lgoal.pose.position.x, lgoal.pose.position.y)
-        except Exception as e:
-            self.get_logger().debug(f"TF transform failed for goal: {e}")
-            # 使用默认目标，确保 plan_goal 始终有值
-            self.plan_goal = (1.0, 0.0) 
-
-        local_pts = []
-        end = min(nearest + max(self.local_path_max_points, 2), len(self.path.poses))
-        for i in range(nearest, end):
-            try:
-                lp = self.tf_buffer.transform(self.path.poses[i], 'base_footprint')
-                local_pts.append((lp.pose.position.x, lp.pose.position.y))
-            except Exception:
-                continue
-        self.plan_path_points = local_pts
-
-        # 确保 goal_dis 始终被初始化
-        if len(self.path.poses) > 0:
-            self.goal_dis = math.hypot(
-                self.x - self.path.poses[-1].pose.position.x,
-                self.y - self.path.poses[-1].pose.position.y,
-            )
-        else:
-            self.goal_dis = float('inf')
-
-    def laser_callback(self, msg):
-        self.laser_lock.acquire()
-        self.ob = []
-        angle_min = msg.angle_min
-        angle_increment = msg.angle_increment
-        for i, r in enumerate(msg.ranges):
-            if not (msg.range_min <= r <= msg.range_max):
-                continue
-            a = angle_min + angle_increment * i
-            if r < self.threshold:
-                self.ob.append((math.cos(a) * r, math.sin(a) * r))
-        self.laser_lock.release()
-
-    def update_obstacle(self):
-        self.laser_lock.acquire()
-        if len(self.ob) > 0:
-            self.plan_ob = np.array(self.ob)
-        else:
-            self.plan_ob = np.empty((0, 2))
-        self.laser_lock.release()
-
-    def publish_velocity(self, zero=False):
-        if zero:
-            self.vx = 0.0
-            self.vw = 0.0
+        
+        # 6. Execute
         cmd = Twist()
-        cmd.linear.x = float(self.vx)
-        cmd.angular.z = float(self.vw)
+        cmd.linear.x = float(v)
+        cmd.angular.z = float(w)
         self.vel_pub.publish(cmd)
+        
+        # Debug Visualization of obstacles seen by planner
+        self.pub_debug_obs(obstacles)
 
+    def process_scan_to_base_frame(self, scan_msg):
+        """
+        Convert LaserScan (ranges) to (x,y) points in base_footprint frame.
+        Handles TF offset properly.
+        """
+        # 1. Polar to Cartesian in Laser Frame
+        angles = np.arange(scan_msg.angle_min, scan_msg.angle_max, scan_msg.angle_increment)
+        # Truncate angles to match ranges length if needed
+        if len(angles) > len(scan_msg.ranges): angles = angles[:len(scan_msg.ranges)]
+        
+        ranges = np.array(scan_msg.ranges)
+        # Filter invalid ranges
+        valid_mask = (ranges > scan_msg.range_min) & (ranges < scan_msg.range_max)
+        
+        valid_ranges = ranges[valid_mask]
+        valid_angles = angles[valid_mask]
+        
+        lx = valid_ranges * np.cos(valid_angles)
+        ly = valid_ranges * np.sin(valid_angles)
+        
+        # 2. Transform from Laser Frame to Base Frame
+        t_base_laser = self.get_transform(self.base_frame, scan_msg.header.frame_id)
+        if not t_base_laser:
+            # Fallback: Assume Identity (dangerous but keeps running)
+            return np.column_stack((lx, ly))
+            
+        # Apply transform
+        tx = t_base_laser.transform.translation.x
+        ty = t_base_laser.transform.translation.y
+        q = t_base_laser.transform.rotation
+        yaw = self.quat_to_yaw(q)
+        
+        # Rotation + Translation
+        # x_base = x_laser * cos(yaw) - y_laser * sin(yaw) + tx
+        bx = lx * math.cos(yaw) - ly * math.sin(yaw) + tx
+        by = lx * math.sin(yaw) + ly * math.cos(yaw) + ty
+        
+        return np.column_stack((bx, by)).tolist()
 
-def normalize_angle(angle):
-    while angle > math.pi:
-        angle -= 2 * math.pi
-    while angle < -math.pi:
-        angle += 2 * math.pi
-    return angle
+    def get_local_goal(self, rx, ry, lookahead):
+        # Find nearest point index
+        poses = self.global_path.poses
+        min_d = float('inf')
+        idx = 0
+        for i, p in enumerate(poses):
+            d = math.hypot(p.pose.position.x - rx, p.pose.position.y - ry)
+            if d < min_d:
+                min_d = d
+                idx = i
+        
+        # Look ahead
+        goal_idx = idx
+        dist_acc = 0
+        while goal_idx < len(poses) - 1:
+            p1 = poses[goal_idx].pose.position
+            p2 = poses[goal_idx+1].pose.position
+            d = math.hypot(p2.x - p1.x, p2.y - p1.y)
+            dist_acc += d
+            if dist_acc > lookahead:
+                break
+            goal_idx += 1
+            
+        gx = poses[goal_idx].pose.position.x
+        gy = poses[goal_idx].pose.position.y
+        
+        # If reached end
+        dist_to_final = math.hypot(poses[-1].pose.position.x - rx, poses[-1].pose.position.y - ry)
+        if dist_to_final < 0.2:
+            self.publish_stop()
+            self.global_path = None # Done
+            self.get_logger().info("Goal Reached!")
+            
+        return gx, gy
 
+    def publish_stop(self):
+        self.vel_pub.publish(Twist())
+
+    def pub_debug_obs(self, obs):
+        if not obs: return
+        m = Marker()
+        m.header.frame_id = self.base_frame
+        m.header.stamp = self.get_clock().now().to_msg()
+        m.type = Marker.POINTS
+        m.action = Marker.ADD
+        m.scale.x = 0.05
+        m.scale.y = 0.05
+        m.color.a = 1.0
+        m.color.r = 1.0
+        for (x,y) in obs:
+            p = Point()
+            p.x = float(x); p.y = float(y)
+            m.points.append(p)
+        self.vis_pub.publish(m)
+
+    @staticmethod
+    def quat_to_yaw(q):
+        # yaw (z-axis rotation)
+        siny_cosp = 2.0 * (q.w * q.z + q.x * q.y)
+        cosy_cosp = 1.0 - 2.0 * (q.y * q.y + q.z * q.z)
+        return math.atan2(siny_cosp, cosy_cosp)
 
 def main(args=None):
     rclpy.init(args=args)
-    local_planner = LocalPlanner()
-    rclpy.spin(local_planner)
-    local_planner.destroy_node()
-    rclpy.shutdown()
-
+    node = LocalPlanner()
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
 
 if __name__ == '__main__':
     main()
