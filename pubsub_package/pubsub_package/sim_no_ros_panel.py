@@ -959,6 +959,7 @@ async function pushParamsNow(){
   await apiPost('/api/set', gatherParams());
   await loadOverlay();
   await loadPoseCheck();
+  buildRosCmds();
 }
 
 function scheduleSet(){
@@ -981,43 +982,43 @@ function buildRosCmds(){
   const global_rr = includeSafety ? (rr + sd) : rr;
 
   const g = [];
-  g.push('ros2 run pubsub_package global_pub --ros-args \\\\');
-  g.push(`  -p robot_radius:=${fmtNum(global_rr)} \\\\`);
-  g.push(`  -p inflation_radius:=${fmtNum(Number(p['inflation_radius'] ?? 0.1))} \\\\`);
-  g.push(`  -p rrt.expand_dis:=${fmtNum(Number(p['rrt.expand_dis'] ?? 0.5))} \\\\`);
-  g.push(`  -p rrt.path_resolution:=${fmtNum(Number(p['rrt.path_resolution'] ?? 0.05))} \\\\`);
-  g.push(`  -p rrt.goal_sample_rate:=${Math.round(Number(p['rrt.goal_sample_rate'] ?? 10))} \\\\`);
-  g.push(`  -p rrt.max_iter:=${Math.round(Number(p['rrt.max_iter'] ?? 5000))} \\\\`);
-  g.push(`  -p rrt.connect_circle_dist:=${fmtNum(Number(p['rrt.connect_circle_dist'] ?? 2.0))} \\\\`);
+  g.push('ros2 run pubsub_package global_pub --ros-args \\');
+  g.push(`  -p robot_radius:=${fmtNum(global_rr)} \\`);
+  g.push(`  -p inflation_radius:=${fmtNum(Number(p['inflation_radius'] ?? 0.1))} \\`);
+  g.push(`  -p rrt.expand_dis:=${fmtNum(Number(p['rrt.expand_dis'] ?? 0.5))} \\`);
+  g.push(`  -p rrt.path_resolution:=${fmtNum(Number(p['rrt.path_resolution'] ?? 0.05))} \\`);
+  g.push(`  -p rrt.goal_sample_rate:=${Math.round(Number(p['rrt.goal_sample_rate'] ?? 10))} \\`);
+  g.push(`  -p rrt.max_iter:=${Math.round(Number(p['rrt.max_iter'] ?? 5000))} \\`);
+  g.push(`  -p rrt.connect_circle_dist:=${fmtNum(Number(p['rrt.connect_circle_dist'] ?? 2.0))} \\`);
   g.push(`  -p rrt.smooth_iter:=${Math.round(Number(p['rrt.smooth_iter'] ?? 200))}`);
 
   const l = [];
-  l.push('ros2 run pubsub_package local_pub --ros-args \\\\');
-  l.push(`  -p real:=${real ? 'true' : 'false'} \\\\`);
-  l.push(`  -p robot_radius:=${fmtNum(rr)} \\\\`);
-  l.push(`  -p safety_dist:=${fmtNum(sd)} \\\\`);
-  l.push(`  -p max_speed:=${fmtNum(Number(p['max_speed'] ?? 0.5))} \\\\`);
-  l.push(`  -p max_yawrate:=${fmtNum(Number(p['max_yawrate'] ?? 0.5))} \\\\`);
-  l.push(`  -p lookahead_dist:=${fmtNum(Number(p['lookahead_dist'] ?? 0.8))} \\\\`);
-  l.push(`  -p local_path_max_points:=${Math.round(Number(p['local_path_max_points'] ?? 30))} \\\\`);
-  l.push(`  -p arrive_dist:=${fmtNum(Number(p['arrive_dist'] ?? 0.2))} \\\\`);
-  l.push(`  -p laser_threshold:=${fmtNum(Number(p['laser_threshold'] ?? 1.5))} \\\\`);
-  l.push(`  -p dwa.to_goal_cost_gain:=${fmtNum(Number(p['dwa.to_goal_cost_gain'] ?? 0.5))} \\\\`);
-  l.push(`  -p dwa.path_cost_gain:=${fmtNum(Number(p['dwa.path_cost_gain'] ?? 2.0))} \\\\`);
-  l.push(`  -p dwa.heading_cost_gain:=${fmtNum(Number(p['dwa.heading_cost_gain'] ?? 0.3))} \\\\`);
-  l.push(`  -p dwa.obstacle_cost_gain:=${fmtNum(Number(p['dwa.obstacle_cost_gain'] ?? 1.0))} \\\\`);
-  l.push(`  -p dwa.speed_cost_gain:=${fmtNum(Number(p['dwa.speed_cost_gain'] ?? 0.2))} \\\\`);
-  l.push(`  -p dwa.predict_time:=${fmtNum(Number(p['dwa.predict_time'] ?? 2.0))} \\\\`);
-  l.push(`  -p dwa.v_samples:=${Math.round(Number(p['dwa.v_samples'] ?? 6))} \\\\`);
+  l.push('ros2 run pubsub_package local_pub --ros-args \\');
+  l.push(`  -p real:=${real ? 'true' : 'false'} \\`);
+  l.push(`  -p robot_radius:=${fmtNum(rr)} \\`);
+  l.push(`  -p safety_dist:=${fmtNum(sd)} \\`);
+  l.push(`  -p max_speed:=${fmtNum(Number(p['max_speed'] ?? 0.5))} \\`);
+  l.push(`  -p max_yawrate:=${fmtNum(Number(p['max_yawrate'] ?? 0.5))} \\`);
+  l.push(`  -p lookahead_dist:=${fmtNum(Number(p['lookahead_dist'] ?? 0.8))} \\`);
+  l.push(`  -p local_path_max_points:=${Math.round(Number(p['local_path_max_points'] ?? 30))} \\`);
+  l.push(`  -p arrive_dist:=${fmtNum(Number(p['arrive_dist'] ?? 0.2))} \\`);
+  l.push(`  -p laser_threshold:=${fmtNum(Number(p['laser_threshold'] ?? 1.5))} \\`);
+  l.push(`  -p dwa.to_goal_cost_gain:=${fmtNum(Number(p['dwa.to_goal_cost_gain'] ?? 0.5))} \\`);
+  l.push(`  -p dwa.path_cost_gain:=${fmtNum(Number(p['dwa.path_cost_gain'] ?? 2.0))} \\`);
+  l.push(`  -p dwa.heading_cost_gain:=${fmtNum(Number(p['dwa.heading_cost_gain'] ?? 0.3))} \\`);
+  l.push(`  -p dwa.obstacle_cost_gain:=${fmtNum(Number(p['dwa.obstacle_cost_gain'] ?? 1.0))} \\`);
+  l.push(`  -p dwa.speed_cost_gain:=${fmtNum(Number(p['dwa.speed_cost_gain'] ?? 0.2))} \\`);
+  l.push(`  -p dwa.predict_time:=${fmtNum(Number(p['dwa.predict_time'] ?? 2.0))} \\`);
+  l.push(`  -p dwa.v_samples:=${Math.round(Number(p['dwa.v_samples'] ?? 6))} \\`);
   l.push(`  -p dwa.w_samples:=${Math.round(Number(p['dwa.w_samples'] ?? 12))}`);
 
   const out = [
     '# Global planner (RRT*)',
-    g.join('\\n'),
+    g.join('\n'),
     '',
     '# Local planner (DWA)',
-    l.join('\\n'),
-  ].join('\\n');
+    l.join('\n'),
+  ].join('\n');
 
   const ta = byId('rosCmd');
   if(ta) ta.value = out;
