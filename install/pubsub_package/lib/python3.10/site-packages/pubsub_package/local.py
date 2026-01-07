@@ -7,6 +7,7 @@ from tf2_ros import TransformException
 from tf2_geometry_msgs import do_transform_pose,PoseStamped
 from scipy.spatial.transform import Rotation as R  # 从scipy导入Rotation类
 import math
+import time
 import numpy as np
 from nav_msgs.msg import Path
 from geometry_msgs.msg import  Twist
@@ -17,8 +18,24 @@ from threading import Lock, Thread
 from pubsub_package.planner.dwa import DWA
 
 class LocalPlanner(Node):
-    def __init__(self, real):
+    def __init__(self, real=None):
         super().__init__('local_planner')
+        self.declare_parameter('real', True)
+        self.declare_parameter('lookahead_dist', 0.8)
+        self.declare_parameter('local_path_max_points', 30)
+        self.declare_parameter('controller_frequency', 10.0)
+        self.declare_parameter('rotate_to_goal', True)
+        self.declare_parameter('yaw_goal_tolerance', 0.3)
+        self.declare_parameter('dwa.to_goal_cost_gain', 0.5)
+        self.declare_parameter('dwa.path_cost_gain', 2.0)
+        self.declare_parameter('dwa.heading_cost_gain', 0.3)
+        self.declare_parameter('dwa.obstacle_cost_gain', 1.0)
+        self.declare_parameter('dwa.speed_cost_gain', 0.2)
+        self.declare_parameter('dwa.predict_time', 2.0)
+        self.declare_parameter('dwa.v_samples', 6)
+        self.declare_parameter('dwa.w_samples', 12)
+        if real is None:
+            real = bool(self.get_parameter('real').value)
         self.real = real
         self.x = 0.0
         self.y = 0.0
@@ -34,6 +51,14 @@ class LocalPlanner(Node):
 
         self.planner = DWA()  # Initialize planner
         self.planner.config(max_speed=self.V_X, max_yawrate=self.V_W, base=self.robot_size)
+        self.planner.to_goal_cost_gain = float(self.get_parameter('dwa.to_goal_cost_gain').value)
+        self.planner.path_cost_gain = float(self.get_parameter('dwa.path_cost_gain').value)
+        self.planner.heading_cost_gain = float(self.get_parameter('dwa.heading_cost_gain').value)
+        self.planner.obstacle_cost_gain = float(self.get_parameter('dwa.obstacle_cost_gain').value)
+        self.planner.speed_cost_gain = float(self.get_parameter('dwa.speed_cost_gain').value)
+        self.planner.predict_time = float(self.get_parameter('dwa.predict_time').value)
+        self.planner.v_samples = int(self.get_parameter('dwa.v_samples').value)
+        self.planner.w_samples = int(self.get_parameter('dwa.w_samples').value)
 
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self)
@@ -55,6 +80,13 @@ class LocalPlanner(Node):
         self.traj = Path()
         self.traj.header.frame_id = 'map'
 
+        self.lookahead_dist = float(self.get_parameter('lookahead_dist').value)
+        self.local_path_max_points = int(self.get_parameter('local_path_max_points').value)
+        self.controller_frequency = float(self.get_parameter('controller_frequency').value)
+        self.rotate_to_goal = bool(self.get_parameter('rotate_to_goal').value)
+        self.yaw_goal_tolerance = float(self.get_parameter('yaw_goal_tolerance').value)
+        self.plan_path_points = []
+
     def path_callback(self, msg):
         self.lock.acquire()
         self.path = msg
@@ -70,8 +102,21 @@ class LocalPlanner(Node):
             self.lock.acquire()
             self.plan_once()
             self.lock.release()
+            time.sleep(1.0 / max(self.controller_frequency, 1.0))
             if self.goal_dis < self.arrive:
                 self.lock.acquire()
+                if self.rotate_to_goal and len(self.path.poses) >= 2:
+                    p1 = self.path.poses[-2].pose.position
+                    p2 = self.path.poses[-1].pose.position
+                    yaw_des = math.atan2(p2.y - p1.y, p2.x - p1.x)
+                    yaw_err = normalize_angle(yaw_des - self.yaw)
+                    if abs(yaw_err) > self.yaw_goal_tolerance:
+                        self.vx = 0.0
+                        self.vw = max(min(1.5 * yaw_err, self.V_W), -self.V_W)
+                        self.publish_velocity(zero=False)
+                        self.lock.release()
+                        continue
+
                 self.publish_velocity(zero=True)
                 self.lock.release()
                 self.get_logger().info("Arrived at goal!")
@@ -94,7 +139,8 @@ class LocalPlanner(Node):
             pose=pose_robot_frame, 
             velocity=velocity, 
             goal=self.plan_goal, 
-            points_cloud=self.plan_ob.tolist()
+            points_cloud=self.plan_ob.tolist(),
+            path_points=self.plan_path_points,
         )
 
         # Apply velocity limits
@@ -156,26 +202,52 @@ class LocalPlanner(Node):
         self.traj_pub.publish(self.traj)
 
         if init:
-            self.goal_index = 1
+            self.goal_index = 0
             self.traj.poses = []
-        for ind in range(len(self.path.poses) - 1, 0, -1):
-            p = self.path.poses[ind].pose.position
-            dis = math.hypot(p.x - self.x, p.y - self.y)
-            if dis < self.robot_size:
-                self.goal_index = min(max(ind + 1, self.goal_index), len(self.path.poses) - 1)
+
+        if len(self.path.poses) < 2:
+            return
+
+        pts = np.array(
+            [[p.pose.position.x, p.pose.position.y] for p in self.path.poses],
+            dtype=float,
+        )
+        d2 = (pts[:, 0] - self.x) ** 2 + (pts[:, 1] - self.y) ** 2
+        nearest = int(np.argmin(d2))
+
+        goal_index = min(nearest + 1, len(self.path.poses) - 1)
+        acc = 0.0
+        for i in range(nearest, len(self.path.poses) - 1):
+            seg = math.hypot(pts[i + 1, 0] - pts[i, 0], pts[i + 1, 1] - pts[i, 1])
+            acc += seg
+            if acc >= self.lookahead_dist:
+                goal_index = i + 1
+                break
+
+        self.goal_index = goal_index
         goal = self.path.poses[self.goal_index]
         self.midpose_pub.publish(goal)
+
         try:
-            # print(goal)
-            lgoal = self.tf_buffer.transform(goal, 'base_footprint') # 超时时间设置为1秒)
-            # lgoal = do_transform_pose(goal, trans) 
-            # print("lgoal")
-            # print("lgoal.pose.position.x:",lgoal.pose.position.x)
+            lgoal = self.tf_buffer.transform(goal, 'base_footprint')
             self.plan_goal = (lgoal.pose.position.x, lgoal.pose.position.y)
         except Exception as e:
             self.get_logger().error(f"TF transformation error: {e}")
-        self.goal_dis = math.hypot(self.x - self.path.poses[-1].pose.position.x,
-                                   self.y - self.path.poses[-1].pose.position.y)
+
+        local_pts = []
+        end = min(nearest + max(self.local_path_max_points, 2), len(self.path.poses))
+        for i in range(nearest, end):
+            try:
+                lp = self.tf_buffer.transform(self.path.poses[i], 'base_footprint')
+                local_pts.append((lp.pose.position.x, lp.pose.position.y))
+            except Exception:
+                break
+        self.plan_path_points = local_pts
+
+        self.goal_dis = math.hypot(
+            self.x - self.path.poses[-1].pose.position.x,
+            self.y - self.path.poses[-1].pose.position.y,
+        )
 
     def laser_callback(self, msg):
         self.laser_lock.acquire()
@@ -216,8 +288,7 @@ def normalize_angle(angle):
 
 def main(args=None):
     rclpy.init(args=args)
-    real = True  # Set to your desired value
-    local_planner = LocalPlanner(real)
+    local_planner = LocalPlanner()
     rclpy.spin(local_planner)
     local_planner.destroy_node()
     rclpy.shutdown()
