@@ -8,6 +8,7 @@ from nav_msgs.srv import GetMap
 from nav_msgs.msg import Path, OccupancyGrid
 from geometry_msgs.msg import PoseStamped
 from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
+from rclpy.parameter import SetParametersResult
 
 import numpy as np
 import sys
@@ -15,11 +16,17 @@ import time
 import math
 # import your own planner
 from pubsub_package.planner.rrt_star import RRT_star as planner
+from pubsub_package.param_panel import ParamSpec, ParamWebPanel
 
 
 class GlobalPlanner(Node):
     def __init__(self):
         super().__init__('global_planner')
+        self.declare_parameter('enable_param_panel', False)
+        self.declare_parameter('param_panel_host', '127.0.0.1')
+        self.declare_parameter('param_panel_port', 8891)
+        self.declare_parameter('param_panel_open_browser', False)
+
         self.declare_parameter('map_frame', 'map')
         self.declare_parameter('base_frame', 'base_footprint')
         self.declare_parameter('log_interval_sec', 1.0)
@@ -27,6 +34,16 @@ class GlobalPlanner(Node):
         self.declare_parameter('inflation_radius', 0.1)
         self.declare_parameter('publish_inflated_map', True)
         self.declare_parameter('inflated_map_topic', '/course_agv/inflated_map')
+
+        self.declare_parameter('rrt.expand_dis', 0.5)
+        self.declare_parameter('rrt.path_resolution', 0.05)
+        self.declare_parameter('rrt.goal_sample_rate', 10)
+        self.declare_parameter('rrt.max_iter', 5000)
+        self.declare_parameter('rrt.connect_circle_dist', 2.0)
+        self.declare_parameter('rrt.search_until_max_iter', False)
+        self.declare_parameter('rrt.smooth_iter', 200)
+        self.declare_parameter('rrt.attempts', 10)
+
         self.map_frame = str(self.get_parameter('map_frame').value)
         self.base_frame = str(self.get_parameter('base_frame').value)
         self.log_interval_sec = float(self.get_parameter('log_interval_sec').value)
@@ -65,6 +82,84 @@ class GlobalPlanner(Node):
         )
         # Note: Service-based planning is disabled, using subscription-based approach instead
         # self.plan_srv = self.create_service(Plan, '/course_agv/global_plan', self.replan)
+
+        self._param_sync_needed = True
+        self.add_on_set_parameters_callback(self._on_set_parameters)
+
+        self._param_panel: ParamWebPanel | None = None
+        if bool(self.get_parameter('enable_param_panel').value):
+            self._start_param_panel()
+        self._param_panel_timer = self.create_timer(0.2, self._param_panel_tick)
+
+    def _on_set_parameters(self, params):
+        for p in params:
+            if p.name in ('map_frame', 'base_frame'):
+                if not str(p.value).strip():
+                    return SetParametersResult(successful=False, reason=f"{p.name} cannot be empty")
+            if p.name in ('robot_radius', 'inflation_radius'):
+                if float(p.value) < 0.0:
+                    return SetParametersResult(successful=False, reason=f"{p.name} must be >= 0")
+            if p.name.startswith('rrt.'):
+                if p.name in ('rrt.max_iter', 'rrt.goal_sample_rate', 'rrt.attempts', 'rrt.smooth_iter') and int(p.value) < 1:
+                    return SetParametersResult(successful=False, reason=f"{p.name} must be >= 1")
+                if p.name in ('rrt.expand_dis', 'rrt.path_resolution', 'rrt.connect_circle_dist') and float(p.value) <= 0.0:
+                    return SetParametersResult(successful=False, reason=f"{p.name} must be > 0")
+        self._param_sync_needed = True
+        return SetParametersResult(successful=True)
+
+    def _sync_params(self) -> None:
+        self.map_frame = str(self.get_parameter('map_frame').value)
+        self.base_frame = str(self.get_parameter('base_frame').value)
+        self.log_interval_sec = float(self.get_parameter('log_interval_sec').value)
+
+        self.plan_robot_radius = float(self.get_parameter('robot_radius').value)
+        self.inflation_radius = float(self.get_parameter('inflation_radius').value)
+        self.publish_inflated_map = bool(self.get_parameter('publish_inflated_map').value)
+        self.inflated_map_topic = str(self.get_parameter('inflated_map_topic').value)
+        self._param_sync_needed = False
+
+    def _param_panel_specs(self) -> dict[str, ParamSpec]:
+        return {
+            'map_frame': ParamSpec('map_frame', 'str', help='TF map frame'),
+            'base_frame': ParamSpec('base_frame', 'str', help='TF base frame'),
+            'robot_radius': ParamSpec('robot_radius', 'float', min=0.05, max=0.6, step=0.01, help='Robot radius (m)'),
+            'inflation_radius': ParamSpec('inflation_radius', 'float', min=0.0, max=0.6, step=0.01, help='Extra inflation (m)'),
+            'publish_inflated_map': ParamSpec('publish_inflated_map', 'bool', help='Publish inflated OccupancyGrid'),
+            'log_interval_sec': ParamSpec('log_interval_sec', 'float', min=0.1, max=10.0, step=0.1, help='Log throttle (s)'),
+            'rrt.expand_dis': ParamSpec('rrt.expand_dis', 'float', min=0.05, max=3.0, step=0.05, help='RRT* step length (m)'),
+            'rrt.path_resolution': ParamSpec('rrt.path_resolution', 'float', min=0.01, max=0.5, step=0.01, help='RRT* interpolation (m)'),
+            'rrt.goal_sample_rate': ParamSpec('rrt.goal_sample_rate', 'int', min=0, max=100, step=1, help='Goal bias (%)'),
+            'rrt.max_iter': ParamSpec('rrt.max_iter', 'int', min=100, max=20000, step=100, help='Max iterations'),
+            'rrt.connect_circle_dist': ParamSpec('rrt.connect_circle_dist', 'float', min=0.5, max=10.0, step=0.1, help='Rewire radius base'),
+            'rrt.search_until_max_iter': ParamSpec('rrt.search_until_max_iter', 'bool', help='Search until max_iter'),
+            'rrt.smooth_iter': ParamSpec('rrt.smooth_iter', 'int', min=0, max=5000, step=50, help='Smoothing iterations'),
+            'rrt.attempts': ParamSpec('rrt.attempts', 'int', min=1, max=50, step=1, help='Replan attempts'),
+        }
+
+    def _start_param_panel(self) -> None:
+        host = str(self.get_parameter('param_panel_host').value)
+        port = int(self.get_parameter('param_panel_port').value)
+        open_browser = bool(self.get_parameter('param_panel_open_browser').value)
+        self._param_panel = ParamWebPanel(
+            self,
+            title="Global Planner Parameter Panel",
+            host=host,
+            port=port,
+            specs=self._param_panel_specs(),
+            open_browser=open_browser,
+        )
+        self._param_panel.start()
+
+    def _param_panel_tick(self) -> None:
+        if self._param_panel is not None:
+            updates = self._param_panel.drain_updates()
+            if updates:
+                ok = self._param_panel.apply_updates(updates)
+                if ok:
+                    self.get_logger().info(f"Applied params: {sorted(updates.keys())}")
+
+        if self._param_sync_needed:
+            self._sync_params()
 
     def update_map(self):
         """Request map from map server via service (alternative to subscription).
@@ -115,17 +210,21 @@ class GlobalPlanner(Node):
         if not hasattr(self, "map"):
             self.get_logger().warning("No /map received yet, skipping planning")
             return
+        if self._param_sync_needed:
+            self._sync_params()
         self.init_planner()
         self.update_global_pose()
 
         res = False
-        attempt = 10
+        attempt = int(self.get_parameter('rrt.attempts').value)
         for _ in range(attempt):
             is_found, path = self.planner.plan(self.plan_sx, self.plan_sy, self.plan_gx, self.plan_gy)
             if is_found:
                 path = self.simplify_path(path, min_dist=self.map.info.resolution * 0.5)
                 if hasattr(self.planner, "smooth_path"):
-                    path = self.planner.smooth_path(path, max_iter=200)
+                    smooth_iter = int(self.get_parameter('rrt.smooth_iter').value)
+                    if smooth_iter > 0:
+                        path = self.planner.smooth_path(path, max_iter=smooth_iter)
                 path = self.simplify_path(path, min_dist=self.map.info.resolution * 0.5)
                 plan_path = self.insert_midpoints(path)
                 self.plan_rx = np.array(plan_path)[:, 0]
@@ -267,8 +366,21 @@ class GlobalPlanner(Node):
             f"Planner init: bounds=({minx:.2f},{miny:.2f})-({maxx:.2f},{maxy:.2f}) obstacles={len(obstacles)} "
             f"robot_radius={self.plan_robot_radius:.2f} inflation={self.inflation_radius:.2f} (cells={inflation_cells})"
         )
-        self.planner = planner(minx=minx, maxx=maxx, miny=miny, maxy=maxy, obstacles=obstacles,
-                               robot_size=self.plan_robot_radius, safe_dist=self.map.info.resolution)
+        self.planner = planner(
+            minx=minx,
+            maxx=maxx,
+            miny=miny,
+            maxy=maxy,
+            obstacles=obstacles,
+            robot_size=self.plan_robot_radius,
+            safe_dist=self.map.info.resolution,
+            expand_dis=float(self.get_parameter('rrt.expand_dis').value),
+            path_resolution=float(self.get_parameter('rrt.path_resolution').value),
+            goal_sample_rate=int(self.get_parameter('rrt.goal_sample_rate').value),
+            max_iter=int(self.get_parameter('rrt.max_iter').value),
+            connect_circle_dist=float(self.get_parameter('rrt.connect_circle_dist').value),
+            search_until_max_iter=bool(self.get_parameter('rrt.search_until_max_iter').value),
+        )
 
     def update_global_pose(self):
         try:

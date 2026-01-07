@@ -40,3 +40,11 @@
    - 启动 global_pub 时开启膨胀图发布（默认开启），topic 为 /course_agv/inflated_map
    - RViz2 中 Add -> Map，Topic 选择 /course_agv/inflated_map
    - 可调参数：robot_radius（机器人半径）、inflation_radius（额外膨胀距离）
+
+11、实时参数控制面板（Ubuntu/WSL 浏览器打开，实时调整下次规划/控制使用的参数）：
+   - global_pub：ros2 run pubsub_package global_pub --ros-args -p enable_param_panel:=true
+     浏览器访问：http://127.0.0.1:8891/
+   - local_pub：ros2 run pubsub_package local_pub --ros-args -p real:=true -p enable_param_panel:=true
+     浏览器访问：http://127.0.0.1:8890/
+   - 可选自动打开浏览器：加参数 -p param_panel_open_browser:=true
+   - 改端口/绑定地址：-p param_panel_port:=889X -p param_panel_host:=127.0.0.1
