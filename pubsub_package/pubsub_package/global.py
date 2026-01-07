@@ -22,12 +22,15 @@ class GlobalPlanner(Node):
         self.declare_parameter('map_frame', 'map')
         self.declare_parameter('base_frame', 'base_footprint')
         self.declare_parameter('log_interval_sec', 1.0)
+        self.declare_parameter('robot_radius', 0.2)
+        self.declare_parameter('inflation_radius', 0.1)
         self.map_frame = str(self.get_parameter('map_frame').value)
         self.base_frame = str(self.get_parameter('base_frame').value)
         self.log_interval_sec = float(self.get_parameter('log_interval_sec').value)
         self._last_log_time = 0.0
 
-        self.plan_robot_radius = 0.15
+        self.plan_robot_radius = float(self.get_parameter('robot_radius').value)
+        self.inflation_radius = float(self.get_parameter('inflation_radius').value)
         self.plan_ox = []  # obstacle
         self.plan_oy = []
         self.plan_sx = 0.0  # start pose
@@ -152,6 +155,47 @@ class GlobalPlanner(Node):
         plan_path.append(path[-1])
         return plan_path
 
+    @staticmethod
+    def inflate_obstacles(occ_grid: np.ndarray, radius_cells: int) -> np.ndarray:
+        """Inflate occupancy grid (binary) by a circular radius in cells.
+
+        Args:
+            occ_grid: bool array, True means occupied
+            radius_cells: inflation radius in grid cells
+
+        Returns:
+            Inflated bool array
+        """
+        r = int(max(radius_cells, 0))
+        if r == 0:
+            return occ_grid
+
+        inflated = np.zeros_like(occ_grid, dtype=bool)
+        offsets = []
+        r2 = r * r
+        for dx in range(-r, r + 1):
+            for dy in range(-r, r + 1):
+                if dx * dx + dy * dy <= r2:
+                    offsets.append((dx, dy))
+
+        w, h = occ_grid.shape
+        for dx, dy in offsets:
+            xs_src_start = max(0, -dx)
+            xs_src_end = min(w, w - dx)
+            ys_src_start = max(0, -dy)
+            ys_src_end = min(h, h - dy)
+
+            xs_dst_start = xs_src_start + dx
+            xs_dst_end = xs_src_end + dx
+            ys_dst_start = ys_src_start + dy
+            ys_dst_end = ys_src_end + dy
+
+            inflated[xs_dst_start:xs_dst_end, ys_dst_start:ys_dst_end] |= occ_grid[
+                xs_src_start:xs_src_end, ys_src_start:ys_src_end
+            ]
+
+        return inflated
+
     def init_planner(self):
       
         map_data = np.array(self.map.data).reshape((self.map.info.height, -1)).transpose()  # 实物
@@ -161,7 +205,12 @@ class GlobalPlanner(Node):
         miny = self.map.info.origin.position.y
         maxy = self.map.info.origin.position.y + map_data.shape[1] * self.map.info.resolution
       
-        ox, oy = np.nonzero(map_data != 0)  # 实物
+        resolution = float(self.map.info.resolution)
+        occ = map_data != 0  # treat unknown as occupied for safety
+        inflation_cells = int(math.ceil(max(self.plan_robot_radius + self.inflation_radius, 0.0) / max(resolution, 1e-6)))
+        occ_inflated = self.inflate_obstacles(occ, inflation_cells)
+
+        ox, oy = np.nonzero(occ_inflated)  # 实物
     
         self.plan_ox = ox * self.map.info.resolution + self.map.info.origin.position.x
         self.plan_oy = oy * self.map.info.resolution + self.map.info.origin.position.y
@@ -169,7 +218,7 @@ class GlobalPlanner(Node):
         obstacles.append((-9999, -9999))
         self.get_logger().info(
             f"Planner init: bounds=({minx:.2f},{miny:.2f})-({maxx:.2f},{maxy:.2f}) obstacles={len(obstacles)} "
-            f"robot_radius={self.plan_robot_radius:.2f}"
+            f"robot_radius={self.plan_robot_radius:.2f} inflation={self.inflation_radius:.2f} (cells={inflation_cells})"
         )
         self.planner = planner(minx=minx, maxx=maxx, miny=miny, maxy=maxy, obstacles=obstacles,
                                robot_size=self.plan_robot_radius, safe_dist=self.map.info.resolution)

@@ -22,6 +22,8 @@ class LocalPlanner(Node):
         self.declare_parameter('real', True)
         self.declare_parameter('map_frame', 'map')
         self.declare_parameter('base_frame', 'base_footprint')
+        self.declare_parameter('robot_radius', 0.2)
+        self.declare_parameter('safety_dist', 0.05)
         self.declare_parameter('lookahead_dist', 0.8)
         self.declare_parameter('local_path_max_points', 30)
         self.declare_parameter('controller_frequency', 10.0)
@@ -49,12 +51,13 @@ class LocalPlanner(Node):
         self.path = Path()
         self.arrive = 0.2  # Standard for arrival
         self.threshold = 1.5  # Laser threshold
-        self.robot_size = 0.2
+        self.robot_size = float(self.get_parameter('robot_radius').value)
+        self.safety_dist = float(self.get_parameter('safety_dist').value)
         self.V_X = 0.5
         self.V_W = 0.5
 
         self.planner = DWA()  # Initialize planner
-        self.planner.config(max_speed=self.V_X, max_yawrate=self.V_W, base=self.robot_size)
+        self.planner.config(max_speed=self.V_X, max_yawrate=self.V_W, base=self.robot_size + self.safety_dist)
         self.planner.to_goal_cost_gain = float(self.get_parameter('dwa.to_goal_cost_gain').value)
         self.planner.path_cost_gain = float(self.get_parameter('dwa.path_cost_gain').value)
         self.planner.heading_cost_gain = float(self.get_parameter('dwa.heading_cost_gain').value)
