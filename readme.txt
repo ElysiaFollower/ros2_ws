@@ -35,3 +35,8 @@
 
 9、WSL(ROS2) 仿真：
    - 编译后：ros2 launch pubsub_package sim2d.launch.py real:=false
+
+10、在 RViz 显示“膨胀图”（不依赖 Nav2 costmap）：
+   - 启动 global_pub 时开启膨胀图发布（默认开启），topic 为 /course_agv/inflated_map
+   - RViz2 中 Add -> Map，Topic 选择 /course_agv/inflated_map
+   - 可调参数：robot_radius（机器人半径）、inflation_radius（额外膨胀距离）

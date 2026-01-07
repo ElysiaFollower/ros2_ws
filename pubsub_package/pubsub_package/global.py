@@ -7,6 +7,7 @@ from tf2_ros import TransformListener, Buffer
 from nav_msgs.srv import GetMap
 from nav_msgs.msg import Path, OccupancyGrid
 from geometry_msgs.msg import PoseStamped
+from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
 
 import numpy as np
 import sys
@@ -24,6 +25,8 @@ class GlobalPlanner(Node):
         self.declare_parameter('log_interval_sec', 1.0)
         self.declare_parameter('robot_radius', 0.2)
         self.declare_parameter('inflation_radius', 0.1)
+        self.declare_parameter('publish_inflated_map', True)
+        self.declare_parameter('inflated_map_topic', '/course_agv/inflated_map')
         self.map_frame = str(self.get_parameter('map_frame').value)
         self.base_frame = str(self.get_parameter('base_frame').value)
         self.log_interval_sec = float(self.get_parameter('log_interval_sec').value)
@@ -31,6 +34,8 @@ class GlobalPlanner(Node):
 
         self.plan_robot_radius = float(self.get_parameter('robot_radius').value)
         self.inflation_radius = float(self.get_parameter('inflation_radius').value)
+        self.publish_inflated_map = bool(self.get_parameter('publish_inflated_map').value)
+        self.inflated_map_topic = str(self.get_parameter('inflated_map_topic').value)
         self.plan_ox = []  # obstacle
         self.plan_oy = []
         self.plan_sx = 0.0  # start pose
@@ -46,6 +51,18 @@ class GlobalPlanner(Node):
         self.map_sub = self.create_subscription(OccupancyGrid, '/map', self.map_callback, 1)
         self.goal_sub = self.create_subscription(PoseStamped, '/course_agv/goal', self.goal_callback, 1)
         self.path_pub = self.create_publisher(Path, '/course_agv/global_path', 1)
+
+        map_qos = QoSProfile(
+            history=HistoryPolicy.KEEP_LAST,
+            depth=1,
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+        )
+        self.inflated_map_pub = self.create_publisher(
+            OccupancyGrid,
+            self.inflated_map_topic,
+            map_qos,
+        )
         # Note: Service-based planning is disabled, using subscription-based approach instead
         # self.plan_srv = self.create_service(Plan, '/course_agv/global_plan', self.replan)
 
@@ -78,6 +95,12 @@ class GlobalPlanner(Node):
                 f"Received /map: size=({msg.info.width}x{msg.info.height}) res={msg.info.resolution:.3f} "
                 f"origin=({msg.info.origin.position.x:.2f},{msg.info.origin.position.y:.2f})"
             )
+
+        if self.publish_inflated_map:
+            try:
+                self._publish_inflated_map()
+            except Exception as e:
+                self.get_logger().error(f"Inflated map publish error: {e}")
 
     def goal_callback(self, msg):
         self.plan_gx = msg.pose.position.x
@@ -173,44 +196,68 @@ class GlobalPlanner(Node):
         inflated = np.zeros_like(occ_grid, dtype=bool)
         offsets = []
         r2 = r * r
-        for dx in range(-r, r + 1):
-            for dy in range(-r, r + 1):
+        for dy in range(-r, r + 1):
+            for dx in range(-r, r + 1):
                 if dx * dx + dy * dy <= r2:
-                    offsets.append((dx, dy))
+                    offsets.append((dy, dx))
 
-        w, h = occ_grid.shape
-        for dx, dy in offsets:
-            xs_src_start = max(0, -dx)
-            xs_src_end = min(w, w - dx)
-            ys_src_start = max(0, -dy)
-            ys_src_end = min(h, h - dy)
+        rows, cols = occ_grid.shape
+        for dy, dx in offsets:
+            src_r0 = max(0, -dy)
+            src_r1 = min(rows, rows - dy)
+            src_c0 = max(0, -dx)
+            src_c1 = min(cols, cols - dx)
 
-            xs_dst_start = xs_src_start + dx
-            xs_dst_end = xs_src_end + dx
-            ys_dst_start = ys_src_start + dy
-            ys_dst_end = ys_src_end + dy
+            dst_r0 = src_r0 + dy
+            dst_r1 = src_r1 + dy
+            dst_c0 = src_c0 + dx
+            dst_c1 = src_c1 + dx
 
-            inflated[xs_dst_start:xs_dst_end, ys_dst_start:ys_dst_end] |= occ_grid[
-                xs_src_start:xs_src_end, ys_src_start:ys_src_end
-            ]
+            inflated[dst_r0:dst_r1, dst_c0:dst_c1] |= occ_grid[src_r0:src_r1, src_c0:src_c1]
 
         return inflated
 
-    def init_planner(self):
-      
-        map_data = np.array(self.map.data).reshape((self.map.info.height, -1)).transpose()  # 实物
-      
-        minx = self.map.info.origin.position.x
-        maxx = self.map.info.origin.position.x + map_data.shape[0] * self.map.info.resolution
-        miny = self.map.info.origin.position.y
-        maxy = self.map.info.origin.position.y + map_data.shape[1] * self.map.info.resolution
-      
+    def _publish_inflated_map(self) -> None:
+        if not hasattr(self, "map"):
+            return
+
+        h = int(self.map.info.height)
+        w = int(self.map.info.width)
         resolution = float(self.map.info.resolution)
-        occ = map_data != 0  # treat unknown as occupied for safety
+
+        map_raw = np.array(self.map.data, dtype=np.int16).reshape((h, w))
+        occ = map_raw >= 50
+
         inflation_cells = int(math.ceil(max(self.plan_robot_radius + self.inflation_radius, 0.0) / max(resolution, 1e-6)))
         occ_inflated = self.inflate_obstacles(occ, inflation_cells)
 
-        ox, oy = np.nonzero(occ_inflated)  # 实物
+        out = OccupancyGrid()
+        out.header.stamp = rclpy.time.Time().to_msg()
+        out.header.frame_id = self.map_frame
+        out.info = self.map.info
+
+        out_data = map_raw.copy()
+        out_data[occ_inflated] = 100
+        out.data = out_data.astype(np.int8).ravel(order="C").tolist()
+        self.inflated_map_pub.publish(out)
+
+    def init_planner(self):
+      
+        h = int(self.map.info.height)
+        w = int(self.map.info.width)
+        map_raw = np.array(self.map.data).reshape((h, w))
+      
+        minx = self.map.info.origin.position.x
+        maxx = self.map.info.origin.position.x + w * self.map.info.resolution
+        miny = self.map.info.origin.position.y
+        maxy = self.map.info.origin.position.y + h * self.map.info.resolution
+      
+        resolution = float(self.map.info.resolution)
+        occ = map_raw != 0  # treat unknown as occupied for safety
+        inflation_cells = int(math.ceil(max(self.plan_robot_radius + self.inflation_radius, 0.0) / max(resolution, 1e-6)))
+        occ_inflated = self.inflate_obstacles(occ, inflation_cells)
+
+        oy, ox = np.nonzero(occ_inflated)  # y, x
     
         self.plan_ox = ox * self.map.info.resolution + self.map.info.origin.position.x
         self.plan_oy = oy * self.map.info.resolution + self.map.info.origin.position.y
