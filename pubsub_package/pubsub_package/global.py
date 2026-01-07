@@ -30,6 +30,7 @@ class GlobalPlanner(Node):
         self.declare_parameter('map_frame', 'map')
         self.declare_parameter('base_frame', 'base_footprint')
         self.declare_parameter('log_interval_sec', 1.0)
+        self.declare_parameter('verbose_log', True)
         self.declare_parameter('robot_radius', 0.2)
         self.declare_parameter('inflation_radius', 0.1)
         self.declare_parameter('publish_inflated_map', True)
@@ -47,6 +48,7 @@ class GlobalPlanner(Node):
         self.map_frame = str(self.get_parameter('map_frame').value)
         self.base_frame = str(self.get_parameter('base_frame').value)
         self.log_interval_sec = float(self.get_parameter('log_interval_sec').value)
+        self.verbose_log = bool(self.get_parameter('verbose_log').value)
         self._last_log_time = 0.0
 
         self.plan_robot_radius = float(self.get_parameter('robot_radius').value)
@@ -61,6 +63,13 @@ class GlobalPlanner(Node):
         self.plan_gy = 0.0
         self.plan_rx = []  # plan
         self.plan_ry = []
+
+        self._last_map_time = 0.0
+        self._last_goal_time = 0.0
+        self._last_plan_time = 0.0
+        self._last_inflated_publish_time = 0.0
+        self._last_plan_ok: bool | None = None
+        self._last_plan_msg = ""
 
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self)
@@ -90,6 +99,15 @@ class GlobalPlanner(Node):
         if bool(self.get_parameter('enable_param_panel').value):
             self._start_param_panel()
         self._param_panel_timer = self.create_timer(0.2, self._param_panel_tick)
+        self._status_timer = self.create_timer(0.2, self._status_tick)
+
+        self.get_logger().info(
+            "GlobalPlanner started: "
+            f"map_frame={self.map_frame} base_frame={self.base_frame} "
+            f"publish_inflated_map={self.publish_inflated_map} inflated_map_topic={self.inflated_map_topic} "
+            f"robot_radius={self.plan_robot_radius:.3f} inflation_radius={self.inflation_radius:.3f} "
+            f"log_interval_sec={self.log_interval_sec:.2f} verbose_log={self.verbose_log}"
+        )
 
     def _on_set_parameters(self, params):
         for p in params:
@@ -111,12 +129,48 @@ class GlobalPlanner(Node):
         self.map_frame = str(self.get_parameter('map_frame').value)
         self.base_frame = str(self.get_parameter('base_frame').value)
         self.log_interval_sec = float(self.get_parameter('log_interval_sec').value)
+        self.verbose_log = bool(self.get_parameter('verbose_log').value)
 
         self.plan_robot_radius = float(self.get_parameter('robot_radius').value)
         self.inflation_radius = float(self.get_parameter('inflation_radius').value)
         self.publish_inflated_map = bool(self.get_parameter('publish_inflated_map').value)
         self.inflated_map_topic = str(self.get_parameter('inflated_map_topic').value)
         self._param_sync_needed = False
+
+    def _status_tick(self) -> None:
+        if not self.verbose_log:
+            return
+        now = time.time()
+        if now - self._last_log_time < max(self.log_interval_sec, 0.1):
+            return
+        self._last_log_time = now
+
+        have_map = hasattr(self, "map")
+        map_age = (now - self._last_map_time) if self._last_map_time > 0 else float("inf")
+        goal_age = (now - self._last_goal_time) if self._last_goal_time > 0 else float("inf")
+        plan_age = (now - self._last_plan_time) if self._last_plan_time > 0 else float("inf")
+        infl_age = (now - self._last_inflated_publish_time) if self._last_inflated_publish_time > 0 else float("inf")
+
+        path_len = int(len(getattr(self, "plan_rx", []) or []))
+        plan_ok = self._last_plan_ok
+        plan_state = "unknown" if plan_ok is None else ("ok" if plan_ok else "fail")
+        msg = self._last_plan_msg
+
+        if have_map:
+            w = int(self.map.info.width)
+            h = int(self.map.info.height)
+            res = float(self.map.info.resolution)
+            self.get_logger().info(
+                f"status: map=({w}x{h}) res={res:.3f} map_age={map_age:.1f}s "
+                f"goal=({self.plan_gx:.2f},{self.plan_gy:.2f}) goal_age={goal_age:.1f}s "
+                f"start=({self.plan_sx:.2f},{self.plan_sy:.2f}) "
+                f"plan={plan_state} path_len={path_len} plan_age={plan_age:.1f}s "
+                f"inflated_pub_age={infl_age:.1f}s topic={self.inflated_map_topic} {msg}"
+            )
+        else:
+            self.get_logger().info(
+                f"status: waiting for /map... goal_age={goal_age:.1f}s plan={plan_state} {msg}"
+            )
 
     def _param_panel_specs(self) -> dict[str, ParamSpec]:
         return {
@@ -183,6 +237,7 @@ class GlobalPlanner(Node):
 
     def map_callback(self, msg):
         self.map = msg
+        self._last_map_time = time.time()
         now = time.time()
         if now - self._last_log_time >= max(self.log_interval_sec, 0.1):
             self._last_log_time = now
@@ -200,15 +255,19 @@ class GlobalPlanner(Node):
     def goal_callback(self, msg):
         self.plan_gx = msg.pose.position.x
         self.plan_gy = msg.pose.position.y
+        self._last_goal_time = time.time()
         self.get_logger().info(
             f"Received new goal: ({self.plan_gx:.3f},{self.plan_gy:.3f}) frame={msg.header.frame_id or self.map_frame}"
         )
         self.replan()
 
     def replan(self):
+        t0 = time.time()
         self.get_logger().info('Replanning...')
         if not hasattr(self, "map"):
             self.get_logger().warning("No /map received yet, skipping planning")
+            self._last_plan_ok = False
+            self._last_plan_msg = "no_map"
             return
         if self._param_sync_needed:
             self._sync_params()
@@ -217,7 +276,8 @@ class GlobalPlanner(Node):
 
         res = False
         attempt = int(self.get_parameter('rrt.attempts').value)
-        for _ in range(attempt):
+        last_reason = ""
+        for k in range(attempt):
             is_found, path = self.planner.plan(self.plan_sx, self.plan_sy, self.plan_gx, self.plan_gy)
             if is_found:
                 path = self.simplify_path(path, min_dist=self.map.info.resolution * 0.5)
@@ -231,16 +291,23 @@ class GlobalPlanner(Node):
                 self.plan_ry = np.array(plan_path)[:, 1]
                 self.publish_path()
                 res = True
+                self._last_plan_ok = True
+                self._last_plan_time = time.time()
+                self._last_plan_msg = f"attempt={k+1}/{attempt} dt={(self._last_plan_time - t0):.3f}s"
                 self.get_logger().info(
                     f"Path found: raw_len={len(path)}, published_len={len(self.plan_rx)} "
                     f"start=({self.plan_sx:.2f},{self.plan_sy:.2f}) goal=({self.plan_gx:.2f},{self.plan_gy:.2f})"
                 )
                 break
             else:
-                self.get_logger().info("Retry...")
+                last_reason = f"attempt={k+1}/{attempt}"
+                self.get_logger().info(f"Retry... ({last_reason})")
 
         if not res:
             self.get_logger().error("Path not found!")
+            self._last_plan_ok = False
+            self._last_plan_time = time.time()
+            self._last_plan_msg = f"{last_reason} dt={(self._last_plan_time - t0):.3f}s"
 
 
 
@@ -339,6 +406,7 @@ class GlobalPlanner(Node):
         out_data[occ_inflated] = 100
         out.data = out_data.astype(np.int8).ravel(order="C").tolist()
         self.inflated_map_pub.publish(out)
+        self._last_inflated_publish_time = time.time()
 
     def init_planner(self):
       
