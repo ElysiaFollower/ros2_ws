@@ -20,6 +20,8 @@ class LocalPlanner(Node):
     def __init__(self, real=None):
         super().__init__('local_planner')
         self.declare_parameter('real', True)
+        self.declare_parameter('map_frame', 'map')
+        self.declare_parameter('base_frame', 'base_footprint')
         self.declare_parameter('lookahead_dist', 0.8)
         self.declare_parameter('local_path_max_points', 30)
         self.declare_parameter('controller_frequency', 10.0)
@@ -36,6 +38,8 @@ class LocalPlanner(Node):
         if real is None:
             real = bool(self.get_parameter('real').value)
         self.real = real
+        self.map_frame = str(self.get_parameter('map_frame').value)
+        self.base_frame = str(self.get_parameter('base_frame').value)
         self.x = 0.0
         self.y = 0.0
         self.yaw = 0.0
@@ -168,8 +172,8 @@ class LocalPlanner(Node):
 
             # 尝试获取坐标变换
             trans = self.tf_buffer.lookup_transform(
-                'map' , 
-                'base_footprint'              , 
+                self.map_frame,
+                self.base_frame,
                 rclpy.time.Time(),
                 rclpy.duration.Duration(seconds=1.0)  # 超时时间设置为1秒
             )
@@ -188,7 +192,7 @@ class LocalPlanner(Node):
             self.get_logger().error(f"TF 错误: {e}")
 
         pose = PoseStamped()
-        pose.header.frame_id = 'map'
+        pose.header.frame_id = self.map_frame
         pose.pose.position.x = self.x
         pose.pose.position.y = self.y
         self.traj.poses.append(pose)
@@ -222,7 +226,7 @@ class LocalPlanner(Node):
         self.midpose_pub.publish(goal)
 
         try:
-            lgoal = self.tf_buffer.transform(goal, 'base_footprint')
+            lgoal = self.tf_buffer.transform(goal, self.base_frame)
             self.plan_goal = (lgoal.pose.position.x, lgoal.pose.position.y)
         except Exception as e:
             self.get_logger().error(f"TF transformation error: {e}")
@@ -231,7 +235,7 @@ class LocalPlanner(Node):
         end = min(nearest + max(self.local_path_max_points, 2), len(self.path.poses))
         for i in range(nearest, end):
             try:
-                lp = self.tf_buffer.transform(self.path.poses[i], 'base_footprint')
+                lp = self.tf_buffer.transform(self.path.poses[i], self.base_frame)
                 local_pts.append((lp.pose.position.x, lp.pose.position.y))
             except Exception:
                 break

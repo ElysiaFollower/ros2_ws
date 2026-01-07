@@ -19,6 +19,11 @@ from pubsub_package.planner.rrt_star import RRT_star as planner
 class GlobalPlanner(Node):
     def __init__(self):
         super().__init__('global_planner')
+        self.declare_parameter('map_frame', 'map')
+        self.declare_parameter('base_frame', 'base_footprint')
+        self.map_frame = str(self.get_parameter('map_frame').value)
+        self.base_frame = str(self.get_parameter('base_frame').value)
+
         self.plan_robot_radius = 0.15
         self.plan_ox = []  # obstacle
         self.plan_oy = []
@@ -69,6 +74,9 @@ class GlobalPlanner(Node):
 
     def replan(self):
         self.get_logger().info('Replanning...')
+        if not hasattr(self, "map"):
+            self.get_logger().warning("No /map received yet, skipping planning")
+            return
         self.init_planner()
         self.update_global_pose()
 
@@ -150,7 +158,12 @@ class GlobalPlanner(Node):
     def update_global_pose(self):
         try:
           
-            trans = self.tf_buffer.lookup_transform('map', 'base_footprint', rclpy.time.Time(), rclpy.duration.Duration(seconds=4.0))
+            trans = self.tf_buffer.lookup_transform(
+                self.map_frame,
+                self.base_frame,
+                rclpy.time.Time(),
+                rclpy.duration.Duration(seconds=4.0),
+            )
             
             self.plan_sx = trans.transform.translation.x
             self.plan_sy = trans.transform.translation.y
@@ -160,11 +173,11 @@ class GlobalPlanner(Node):
     def publish_path(self):
         path = Path()
         path.header.stamp = rclpy.time.Time().to_msg()
-        path.header.frame_id = 'map'
+        path.header.frame_id = self.map_frame
         for i in range(len(self.plan_rx)):
             pose = PoseStamped()
             pose.header.stamp = rclpy.time.Time().to_msg()
-            pose.header.frame_id = 'map'
+            pose.header.frame_id = self.map_frame
             pose.pose.position.x = self.plan_rx[i]
             pose.pose.position.y = self.plan_ry[i]
             pose.pose.position.z = 0.01
