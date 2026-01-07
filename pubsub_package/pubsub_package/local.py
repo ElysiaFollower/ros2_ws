@@ -5,6 +5,7 @@ from rclpy.node import Node
 from tf2_ros import TransformListener, Buffer
 from tf2_ros import TransformException
 from geometry_msgs.msg import PoseStamped
+from rclpy.parameter import SetParametersResult
 import math
 import time
 import numpy as np
@@ -15,10 +16,16 @@ from sensor_msgs.msg import LaserScan
 from threading import Lock, Thread
 # Import your own planner
 from pubsub_package.planner.dwa import DWA
+from pubsub_package.param_panel import ParamSpec, ParamWebPanel
 
 class LocalPlanner(Node):
     def __init__(self, real=None):
         super().__init__('local_planner')
+        self.declare_parameter('enable_param_panel', False)
+        self.declare_parameter('param_panel_host', '127.0.0.1')
+        self.declare_parameter('param_panel_port', 8890)
+        self.declare_parameter('param_panel_open_browser', False)
+
         self.declare_parameter('real', True)
         self.declare_parameter('map_frame', 'map')
         self.declare_parameter('base_frame', 'base_footprint')
@@ -30,6 +37,10 @@ class LocalPlanner(Node):
         self.declare_parameter('rotate_to_goal', True)
         self.declare_parameter('yaw_goal_tolerance', 0.3)
         self.declare_parameter('log_interval_sec', 1.0)
+        self.declare_parameter('arrive_dist', 0.2)
+        self.declare_parameter('laser_threshold', 1.5)
+        self.declare_parameter('max_speed', 0.5)
+        self.declare_parameter('max_yawrate', 0.5)
         self.declare_parameter('dwa.to_goal_cost_gain', 0.5)
         self.declare_parameter('dwa.path_cost_gain', 2.0)
         self.declare_parameter('dwa.heading_cost_gain', 0.3)
@@ -49,23 +60,15 @@ class LocalPlanner(Node):
         self.vx = 0.0
         self.vw = 0.0
         self.path = Path()
-        self.arrive = 0.2  # Standard for arrival
-        self.threshold = 1.5  # Laser threshold
+        self.arrive = float(self.get_parameter('arrive_dist').value)  # Standard for arrival
+        self.threshold = float(self.get_parameter('laser_threshold').value)  # Laser threshold
         self.robot_size = float(self.get_parameter('robot_radius').value)
         self.safety_dist = float(self.get_parameter('safety_dist').value)
-        self.V_X = 0.5
-        self.V_W = 0.5
+        self.V_X = float(self.get_parameter('max_speed').value)
+        self.V_W = float(self.get_parameter('max_yawrate').value)
 
         self.planner = DWA()  # Initialize planner
-        self.planner.config(max_speed=self.V_X, max_yawrate=self.V_W, base=self.robot_size + self.safety_dist)
-        self.planner.to_goal_cost_gain = float(self.get_parameter('dwa.to_goal_cost_gain').value)
-        self.planner.path_cost_gain = float(self.get_parameter('dwa.path_cost_gain').value)
-        self.planner.heading_cost_gain = float(self.get_parameter('dwa.heading_cost_gain').value)
-        self.planner.obstacle_cost_gain = float(self.get_parameter('dwa.obstacle_cost_gain').value)
-        self.planner.speed_cost_gain = float(self.get_parameter('dwa.speed_cost_gain').value)
-        self.planner.predict_time = float(self.get_parameter('dwa.predict_time').value)
-        self.planner.v_samples = int(self.get_parameter('dwa.v_samples').value)
-        self.planner.w_samples = int(self.get_parameter('dwa.w_samples').value)
+        self._sync_params_locked()
 
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self)
@@ -99,6 +102,116 @@ class LocalPlanner(Node):
         self._path_version = 0
         self._last_seen_path_version = -1
         self._last_log_time = 0.0
+        self._param_sync_needed = False
+
+        self.add_on_set_parameters_callback(self._on_set_parameters)
+
+        self._param_panel: ParamWebPanel | None = None
+        if bool(self.get_parameter('enable_param_panel').value):
+            self._start_param_panel()
+        self._param_panel_timer = self.create_timer(0.2, self._param_panel_tick)
+
+    def _on_set_parameters(self, params):
+        for p in params:
+            if p.name in ('map_frame', 'base_frame'):
+                if not str(p.value).strip():
+                    return SetParametersResult(successful=False, reason=f"{p.name} cannot be empty")
+            if p.name in ('robot_radius', 'safety_dist'):
+                if float(p.value) < 0.0:
+                    return SetParametersResult(successful=False, reason=f"{p.name} must be >= 0")
+            if p.name in ('controller_frequency',):
+                if float(p.value) <= 0.0:
+                    return SetParametersResult(successful=False, reason="controller_frequency must be > 0")
+            if p.name.startswith('dwa.'):
+                if p.name in ('dwa.v_samples', 'dwa.w_samples') and int(p.value) < 2:
+                    return SetParametersResult(successful=False, reason=f"{p.name} must be >= 2")
+                if p.name == 'dwa.predict_time' and float(p.value) <= 0.0:
+                    return SetParametersResult(successful=False, reason="dwa.predict_time must be > 0")
+                if p.name.endswith('cost_gain') and float(p.value) < 0.0:
+                    return SetParametersResult(successful=False, reason=f"{p.name} must be >= 0")
+        self._param_sync_needed = True
+        return SetParametersResult(successful=True)
+
+    def _sync_params_locked(self) -> None:
+        self.map_frame = str(self.get_parameter('map_frame').value)
+        self.base_frame = str(self.get_parameter('base_frame').value)
+
+        self.arrive = float(self.get_parameter('arrive_dist').value)
+        self.threshold = float(self.get_parameter('laser_threshold').value)
+
+        self.robot_size = float(self.get_parameter('robot_radius').value)
+        self.safety_dist = float(self.get_parameter('safety_dist').value)
+        self.V_X = float(self.get_parameter('max_speed').value)
+        self.V_W = float(self.get_parameter('max_yawrate').value)
+
+        self.lookahead_dist = float(self.get_parameter('lookahead_dist').value)
+        self.local_path_max_points = int(self.get_parameter('local_path_max_points').value)
+        self.controller_frequency = float(self.get_parameter('controller_frequency').value)
+        self.rotate_to_goal = bool(self.get_parameter('rotate_to_goal').value)
+        self.yaw_goal_tolerance = float(self.get_parameter('yaw_goal_tolerance').value)
+        self.log_interval_sec = float(self.get_parameter('log_interval_sec').value)
+
+        self.planner.config(max_speed=self.V_X, max_yawrate=self.V_W, base=self.robot_size + self.safety_dist)
+        self.planner.to_goal_cost_gain = float(self.get_parameter('dwa.to_goal_cost_gain').value)
+        self.planner.path_cost_gain = float(self.get_parameter('dwa.path_cost_gain').value)
+        self.planner.heading_cost_gain = float(self.get_parameter('dwa.heading_cost_gain').value)
+        self.planner.obstacle_cost_gain = float(self.get_parameter('dwa.obstacle_cost_gain').value)
+        self.planner.speed_cost_gain = float(self.get_parameter('dwa.speed_cost_gain').value)
+        self.planner.predict_time = float(self.get_parameter('dwa.predict_time').value)
+        self.planner.v_samples = int(self.get_parameter('dwa.v_samples').value)
+        self.planner.w_samples = int(self.get_parameter('dwa.w_samples').value)
+
+        if hasattr(self, "traj"):
+            self.traj.header.frame_id = self.map_frame
+
+        self._param_sync_needed = False
+
+    def _param_panel_specs(self) -> dict[str, ParamSpec]:
+        return {
+            'map_frame': ParamSpec('map_frame', 'str', help='TF map frame'),
+            'base_frame': ParamSpec('base_frame', 'str', help='TF base frame'),
+            'robot_radius': ParamSpec('robot_radius', 'float', min=0.05, max=0.6, step=0.01, help='Robot radius (m)'),
+            'safety_dist': ParamSpec('safety_dist', 'float', min=0.0, max=0.5, step=0.01, help='Extra safety distance (m)'),
+            'max_speed': ParamSpec('max_speed', 'float', min=0.0, max=1.5, step=0.05, help='Max linear speed (m/s)'),
+            'max_yawrate': ParamSpec('max_yawrate', 'float', min=0.0, max=3.0, step=0.05, help='Max angular speed (rad/s)'),
+            'lookahead_dist': ParamSpec('lookahead_dist', 'float', min=0.2, max=5.0, step=0.1, help='Lookahead distance along global path (m)'),
+            'controller_frequency': ParamSpec('controller_frequency', 'float', min=1.0, max=30.0, step=1.0, help='Control loop frequency (Hz)'),
+            'arrive_dist': ParamSpec('arrive_dist', 'float', min=0.05, max=1.5, step=0.05, help='Goal arrival distance (m)'),
+            'laser_threshold': ParamSpec('laser_threshold', 'float', min=0.2, max=10.0, step=0.1, help='Laser obstacle threshold (m)'),
+            'rotate_to_goal': ParamSpec('rotate_to_goal', 'bool', help='Rotate to goal heading at end'),
+            'yaw_goal_tolerance': ParamSpec('yaw_goal_tolerance', 'float', min=0.05, max=1.5, step=0.05, help='Yaw tolerance (rad)'),
+            'log_interval_sec': ParamSpec('log_interval_sec', 'float', min=0.1, max=10.0, step=0.1, help='Log throttle (s)'),
+            'dwa.to_goal_cost_gain': ParamSpec('dwa.to_goal_cost_gain', 'float', min=0.0, max=10.0, step=0.05, help='Goal critic weight'),
+            'dwa.path_cost_gain': ParamSpec('dwa.path_cost_gain', 'float', min=0.0, max=10.0, step=0.05, help='Path critic weight'),
+            'dwa.heading_cost_gain': ParamSpec('dwa.heading_cost_gain', 'float', min=0.0, max=10.0, step=0.05, help='Heading critic weight'),
+            'dwa.obstacle_cost_gain': ParamSpec('dwa.obstacle_cost_gain', 'float', min=0.0, max=10.0, step=0.05, help='Obstacle critic weight'),
+            'dwa.speed_cost_gain': ParamSpec('dwa.speed_cost_gain', 'float', min=0.0, max=10.0, step=0.05, help='Speed critic weight'),
+            'dwa.predict_time': ParamSpec('dwa.predict_time', 'float', min=0.5, max=5.0, step=0.1, help='Trajectory rollout time (s)'),
+            'dwa.v_samples': ParamSpec('dwa.v_samples', 'int', min=2, max=50, step=1, help='Velocity samples'),
+            'dwa.w_samples': ParamSpec('dwa.w_samples', 'int', min=2, max=80, step=1, help='Yawrate samples'),
+        }
+
+    def _start_param_panel(self) -> None:
+        host = str(self.get_parameter('param_panel_host').value)
+        port = int(self.get_parameter('param_panel_port').value)
+        open_browser = bool(self.get_parameter('param_panel_open_browser').value)
+        self._param_panel = ParamWebPanel(
+            self,
+            title="Local Planner Parameter Panel",
+            host=host,
+            port=port,
+            specs=self._param_panel_specs(),
+            open_browser=open_browser,
+        )
+        self._param_panel.start()
+
+    def _param_panel_tick(self) -> None:
+        if self._param_panel is not None:
+            updates = self._param_panel.drain_updates()
+            if updates:
+                ok = self._param_panel.apply_updates(updates)
+                if ok:
+                    self.get_logger().info(f"Applied params: {sorted(updates.keys())}")
 
     def path_callback(self, msg):
         self.lock.acquire()
@@ -125,6 +238,11 @@ class LocalPlanner(Node):
             sleep_dt = 1.0 / max(self.controller_frequency, 1.0)
             self.lock.acquire()
             try:
+                if self._param_sync_needed:
+                    self._sync_params_locked()
+                    sleep_dt = 1.0 / max(self.controller_frequency, 1.0)
+                    self.get_logger().info("Parameters updated (applies to next control cycle).")
+
                 if len(self.path.poses) < 2:
                     self.lock.release()
                     time.sleep(0.1)
