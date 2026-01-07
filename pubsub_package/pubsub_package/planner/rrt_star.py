@@ -121,8 +121,11 @@ class RRT_star:
             new_node.cost = near_node.cost + math.hypot(new_node.x - near_node.x,
                                                          new_node.y - near_node.y)
 
-            if self._check_collision(new_node):
+            if self._check_collision(new_node) and self._check_if_inside_play_area(new_node):
                 near_inds = self._find_near_nodes(new_node)
+                # 确保最近节点包含在候选父节点中（RRT* 标准要求）
+                if nearest_ind not in near_inds:
+                    near_inds.append(nearest_ind)
                 node_with_updated_parent = self._choose_parent(new_node, near_inds)
                 if node_with_updated_parent:
                     self._rewire(node_with_updated_parent, near_inds)
@@ -251,25 +254,25 @@ class RRT_star:
         if not near_inds:
             return None
 
-        costs = []
+        best_cost = float("inf")
+        best_ind = None
+        best_steered_node = None
+
         for i in near_inds:
             near_node = self.node_list[i]
             t_node = self._steer(near_node, new_node)
             if t_node and self._check_collision(t_node):
-                costs.append(self._calc_new_cost(near_node, new_node))
-            else:
-                costs.append(float("inf"))
+                cost = self._calc_new_cost(near_node, new_node)
+                if cost < best_cost:
+                    best_cost = cost
+                    best_ind = i
+                    best_steered_node = t_node
 
-        min_cost = min(costs)
-
-        if min_cost == float("inf"):
+        if best_ind is None:
             return None
 
-        min_ind = near_inds[costs.index(min_cost)]
-        new_node = self._steer(self.node_list[min_ind], new_node)
-        new_node.cost = min_cost
-
-        return new_node
+        best_steered_node.cost = best_cost
+        return best_steered_node
 
     def _search_best_goal_node(self):
         """Search for best node near goal"""
@@ -314,6 +317,9 @@ class RRT_star:
         """Rewire nearby nodes if cheaper path through new_node"""
         for i in near_inds:
             near_node = self.node_list[i]
+            # 跳过新节点本身（避免自引用）
+            if near_node is new_node:
+                continue
             edge_node = self._steer(new_node, near_node)
             if not edge_node:
                 continue
@@ -323,11 +329,13 @@ class RRT_star:
             improved_cost = near_node.cost > edge_node.cost
 
             if no_collision and improved_cost:
-                for node in self.node_list:
-                    if node.parent == self.node_list[i]:
-                        node.parent = edge_node
-                self.node_list[i] = edge_node
-                self._propagate_cost_to_leaves(self.node_list[i])
+                # 更新原节点的父节点、代价和路径信息
+                near_node.parent = new_node
+                near_node.cost = edge_node.cost
+                near_node.path_x = edge_node.path_x[:]  # 复制路径信息
+                near_node.path_y = edge_node.path_y[:]
+                # 传播代价更新到子节点（子节点的父节点关系不变，只更新代价）
+                self._propagate_cost_to_leaves(near_node)
 
     def _calc_new_cost(self, from_node, to_node):
         """Calculate cost from from_node to to_node"""
