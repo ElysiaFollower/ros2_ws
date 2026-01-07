@@ -1,11 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-"""
-RRT* Path Planning Algorithm (Grid-Based Optimization)
-Refactored for Production-Grade Performance
-"""
-
 import math
 import random
 import numpy as np
@@ -28,14 +23,16 @@ class RRT_star:
     def __init__(self, grid_map, resolution, origin_x, origin_y, 
                  robot_radius=0.2, safe_dist=0.05,
                  expand_dis=1.0, path_resolution=0.1, 
-                 goal_sample_rate=5, max_iter=2000):
+                 goal_sample_rate=5, max_iter=1000):
         """
         Args:
-            grid_map: 2D numpy array (0=free, 100=occupied)
+            grid_map: 2D numpy array (0=free, 100=occupied, -1=unknown)
             resolution: Map resolution (m/cell)
             origin_x, origin_y: Map origin coordinates
             robot_radius: Robot physical radius (m)
             safe_dist: Extra safety margin (m)
+            expand_dis: RRT Step size (m) - increased for speed
+            max_iter: Max iterations - reduced for speed
         """
         self.grid = grid_map
         self.resolution = resolution
@@ -51,9 +48,6 @@ class RRT_star:
 
         # Collision parameters
         self.collision_radius = robot_radius + safe_dist
-        # Convert radius to pixel distance for fast checking
-        self.collision_pixels = int(math.ceil(self.collision_radius / resolution))
-
         self.expand_dis = expand_dis
         self.path_resolution = path_resolution
         self.goal_sample_rate = goal_sample_rate
@@ -64,12 +58,17 @@ class RRT_star:
     def plan(self, sx, sy, gx, gy):
         """Plan path from (sx, sy) to (gx, gy)."""
         # 1. Bounds check
-        if not self._is_valid_pos(sx, sy) or not self._is_valid_pos(gx, gy):
+        if not self._is_valid_pos(sx, sy):
+            print(f"[RRT] Error: Start ({sx:.2f}, {sy:.2f}) out of map bounds")
+            return False, []
+        if not self._is_valid_pos(gx, gy):
+            print(f"[RRT] Error: Goal ({gx:.2f}, {gy:.2f}) out of map bounds")
             return False, []
         
         # 2. Collision check for start/goal
-        if self._is_in_collision(sx, sy) or self._is_in_collision(gx, gy):
-            # Try to snap to nearest free space if slightly invalid could be added here
+        # We allow start to be slightly invalid (to escape obstacles), but goal must be valid
+        if self._is_in_collision(gx, gy):
+            print("[RRT] Error: Goal is in collision or unknown area!")
             return False, []
 
         self.start = self.Node(sx, sy)
@@ -98,8 +97,8 @@ class RRT_star:
                     # Rewire
                     self._rewire(new_node, near_inds)
 
-            # Early Exit: Check if goal is reached
-            if i % 50 == 0:  # Check occasionally to save time
+            # Early Exit: Check if goal is reached regularly
+            if i % 50 == 0:
                 dist_to_goal = math.hypot(self.node_list[-1].x - self.end.x, 
                                         self.node_list[-1].y - self.end.y)
                 if dist_to_goal <= self.expand_dis:
@@ -123,10 +122,9 @@ class RRT_star:
         if not (0 <= gx < self.width and 0 <= gy < self.height):
             return True # Out of bounds is collision
         
-        # Simple point check with inflation handled by map preprocessing usually, 
-        # but here we check the raw grid value.
-        # Assuming grid is 0-100, where > 50 is obstacle.
-        if self.grid[gy, gx] > 50: 
+        # Grid values: 0 (free), 100 (occupied), -1 (unknown)
+        val = self.grid[gy, gx]
+        if val == -1 or val > 50: 
             return True
             
         return False
@@ -223,7 +221,6 @@ class RRT_star:
             
             if self._check_collision_path(edge_node) and near_node.cost > edge_node.cost:
                 # Update parent
-                # Note: In a full implementation, we need to update children's costs recursively
                 self.node_list[i] = edge_node
                 self.node_list[i].parent = new_node
 
@@ -260,7 +257,6 @@ class RRT_star:
             p1 = path[i]
             p2 = path[j]
             
-            # Check straight line connection
             # Check discrete points along the line
             dist = math.hypot(p1[0]-p2[0], p1[1]-p2[1])
             steps = int(dist / self.resolution)

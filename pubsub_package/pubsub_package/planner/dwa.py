@@ -20,7 +20,7 @@ class DWA:
         self.robot_radius = 0.2
         
         # Weights
-        self.alpha = 0.5  # To Goal
+        self.alpha = 0.8  # To Goal (increased)
         self.beta = 0.5   # To Path
         self.gamma = 1.0  # Obstacle
         self.delta = 0.2  # Speed
@@ -67,17 +67,15 @@ class DWA:
         min_cost = float('inf')
         
         # Dynamic Window
-        v_min = max(0.0, velocity[0] - 0.5 * self.dt) # accel limit assumption
-        v_max = min(self.max_speed, velocity[0] + 0.5 * self.dt)
-        w_min = max(-self.max_yawrate, velocity[1] - 1.0 * self.dt)
-        w_max = min(self.max_yawrate, velocity[1] + 1.0 * self.dt)
+        v_min = 0.0 # No backward motion for differential drive standard
+        v_max = min(self.max_speed, velocity[0] + 0.2) # simple accel limit
+        w_min = max(-self.max_yawrate, velocity[1] - 1.0)
+        w_max = min(self.max_yawrate, velocity[1] + 1.0)
         
         vs = np.linspace(v_min, v_max, self.v_samples)
         ws = np.linspace(w_min, w_max, self.w_samples)
         
-        valid_obs = np.array(obstacles) if len(obstacles) > 0 else np.empty((0,2))
-
-        # Force a recovery spin if stuck? Handled by planner logic, not here.
+        valid_obs = np.array(obstacles) if (obstacles is not None and len(obstacles) > 0) else np.empty((0,2))
         
         found_valid = False
 
@@ -85,26 +83,25 @@ class DWA:
             for w in ws:
                 traj = self.predict_trajectory(pose, v, w)
                 
-                # 1. To Goal Cost
+                # 1. To Goal Cost (Euclidean distance from end of trajectory)
                 dx = goal[0] - traj[-1, 0]
                 dy = goal[1] - traj[-1, 1]
                 cost_goal = math.hypot(dx, dy)
                 
                 # 2. Obstacle Cost
                 cost_obs = 0.0
-                min_dist = float('inf')
                 if len(valid_obs) > 0:
-                    # Vectorized distance calculation
-                    # traj: (T, 3), obs: (N, 2)
-                    # We need min dist from any point in traj to any point in obs
-                    # Simplified: just check endpoint or subsample
+                    # Check distance from every point in trajectory to every obstacle
+                    # Optimized: just check if any point is too close
+                    min_dist = float('inf')
                     
-                    # For strict safety, check all traj points against all obs is slow in python
-                    # We check every other point against kdtree or just simple loop
+                    # Simple loop for safety (can be vectorized further)
                     for tx, ty, _ in traj:
-                        dists = np.hypot(valid_obs[:,0] - tx, valid_obs[:,1] - ty)
-                        min_dist = min(min_dist, np.min(dists))
-                    
+                         # Distances from current traj point to all obstacles
+                         dists = np.hypot(valid_obs[:,0] - tx, valid_obs[:,1] - ty)
+                         current_min = np.min(dists)
+                         min_dist = min(min_dist, current_min)
+
                     if min_dist <= self.robot_radius:
                         cost_obs = float('inf') # Collision
                     else:
@@ -113,10 +110,10 @@ class DWA:
                 if cost_obs == float('inf'):
                     continue
 
-                # 3. Speed Cost (Prefer fast)
+                # 3. Speed Cost (Prefer high speed)
                 cost_speed = self.max_speed - v
 
-                # Total
+                # Total Cost
                 total_cost = (self.alpha * cost_goal + 
                               self.gamma * cost_obs + 
                               self.delta * cost_speed)
@@ -126,7 +123,7 @@ class DWA:
                     best_u = [v, w]
                     found_valid = True
 
-        # Fallback: if no valid path, slow down or stop
+        # Fallback: if no valid path, return zero velocity
         if not found_valid:
             return [0.0, 0.0]
             
