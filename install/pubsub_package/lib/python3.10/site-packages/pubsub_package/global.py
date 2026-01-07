@@ -77,6 +77,10 @@ class GlobalPlanner(Node):
         for _ in range(attempt):
             is_found, path = self.planner.plan(self.plan_sx, self.plan_sy, self.plan_gx, self.plan_gy)
             if is_found:
+                path = self.simplify_path(path, min_dist=self.map.info.resolution * 0.5)
+                if hasattr(self.planner, "smooth_path"):
+                    path = self.planner.smooth_path(path, max_iter=200)
+                path = self.simplify_path(path, min_dist=self.map.info.resolution * 0.5)
                 plan_path = self.insert_midpoints(path)
                 self.plan_rx = np.array(plan_path)[:, 0]
                 self.plan_ry = np.array(plan_path)[:, 1]
@@ -91,6 +95,21 @@ class GlobalPlanner(Node):
             self.get_logger().error("Path not found!")
 
 
+
+    @staticmethod
+    def simplify_path(path, min_dist=0.05):
+        if not path:
+            return []
+        out = [path[0]]
+        last_x, last_y = float(path[0][0]), float(path[0][1])
+        for p in path[1:]:
+            x, y = float(p[0]), float(p[1])
+            if math.hypot(x - last_x, y - last_y) >= min_dist:
+                out.append([x, y])
+                last_x, last_y = x, y
+        if len(out) == 1 and len(path) > 1:
+            out.append([float(path[-1][0]), float(path[-1][1])])
+        return out
 
     def insert_midpoints(self, path):
         plan_path = []

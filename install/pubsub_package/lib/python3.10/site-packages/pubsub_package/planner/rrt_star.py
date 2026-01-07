@@ -11,6 +11,11 @@ import random
 import math
 import numpy as np
 
+try:
+    from scipy.spatial import cKDTree as KDTree  # type: ignore
+except Exception:  # pragma: no cover
+    KDTree = None
+
 
 class RRT_star:
     """
@@ -59,6 +64,30 @@ class RRT_star:
         self.search_until_max_iter = search_until_max_iter
         self.node_list = []
 
+        self._obstacle_points = self._normalize_obstacles(obstacles)
+        self._obstacle_kdtree = KDTree(self._obstacle_points) if (KDTree and len(self._obstacle_points) > 0) else None
+
+    @staticmethod
+    def _normalize_obstacles(obstacles):
+        if not obstacles:
+            return np.empty((0, 2), dtype=float)
+
+        points = []
+        for obs in obstacles:
+            if obs is None:
+                continue
+            if len(obs) < 2:
+                continue
+            ox, oy = float(obs[0]), float(obs[1])
+            if not np.isfinite(ox) or not np.isfinite(oy):
+                continue
+            points.append((ox, oy))
+
+        if not points:
+            return np.empty((0, 2), dtype=float)
+
+        return np.asarray(points, dtype=float)
+
     def plan(self, sx, sy, gx, gy):
         """
         Plan path from start to goal
@@ -70,6 +99,13 @@ class RRT_star:
         Returns:
             (is_found, path): Tuple of success flag and path list [(x, y), ...]
         """
+        if sx < self.minx or sx > self.maxx or sy < self.miny or sy > self.maxy:
+            return False, []
+        if gx < self.minx or gx > self.maxx or gy < self.miny or gy > self.maxy:
+            return False, []
+        if self._is_point_collision(sx, sy) or self._is_point_collision(gx, gy):
+            return False, []
+
         self.start = self.Node(sx, sy)
         self.end = self.Node(gx, gy)
         self.goal_node = self.Node(gx, gy)
@@ -178,8 +214,16 @@ class RRT_star:
         if node is None:
             return False
 
-        for (ox, oy) in self.obstacles:
-            for (px, py) in zip(node.path_x, node.path_y):
+        if not node.path_x:
+            return False
+
+        if self._obstacle_kdtree is not None:
+            pts = np.column_stack((node.path_x, node.path_y))
+            dists, _ = self._obstacle_kdtree.query(pts, k=1)
+            return bool(np.all(dists > self.robot_radius))
+
+        for (px, py) in zip(node.path_x, node.path_y):
+            for (ox, oy) in self.obstacles:
                 d = math.hypot(ox - px, oy - py)
                 if d <= self.robot_radius:
                     return False  # Collision
@@ -232,10 +276,7 @@ class RRT_star:
         dist_to_goal_list = [
             self._calc_dist_to_goal(n.x, n.y) for n in self.node_list
         ]
-        goal_inds = [
-            dist_to_goal_list.index(i) for i in dist_to_goal_list
-            if i <= self.expand_dis
-        ]
+        goal_inds = [i for i, dist in enumerate(dist_to_goal_list) if dist <= self.expand_dis]
 
         safe_goal_inds = []
         for goal_ind in goal_inds:
@@ -266,7 +307,7 @@ class RRT_star:
 
         dist_list = [(node.x - new_node.x) ** 2 + (node.y - new_node.y) ** 2
                      for node in self.node_list]
-        near_inds = [dist_list.index(i) for i in dist_list if i <= r ** 2]
+        near_inds = [i for i, dist in enumerate(dist_list) if dist <= r ** 2]
         return near_inds
 
     def _rewire(self, new_node, near_inds):
@@ -416,6 +457,14 @@ class RRT_star:
 
         steps = int(length / sample_step) + 1
 
+        if self._obstacle_kdtree is not None:
+            ts = np.linspace(0.0, 1.0, steps + 1)
+            xs = x1 + ts * dx
+            ys = y1 + ts * dy
+            pts = np.column_stack((xs, ys))
+            dists, _ = self._obstacle_kdtree.query(pts, k=1)
+            return bool(np.all(dists > self.robot_radius))
+
         for i in range(steps + 1):
             t = i / steps
             x = x1 + t * dx
@@ -436,6 +485,10 @@ class RRT_star:
         Returns:
             True if collision, False otherwise
         """
+        if self._obstacle_kdtree is not None:
+            dist, _ = self._obstacle_kdtree.query([[x, y]], k=1)
+            return bool(dist[0] <= self.robot_radius)
+
         for (ox, oy) in self.obstacles:
             d = math.hypot(ox - x, oy - y)
             if d <= self.robot_radius:
