@@ -28,6 +28,7 @@ setup(
         'global_pub = pubsub_package.global:main',
         'local_pub = pubsub_package.local:main',
         'sim2d = pubsub_package.sim2d:main',
+        'sim_no_ros_panel = pubsub_package.sim_no_ros_panel:main',
         ],
     },
 )

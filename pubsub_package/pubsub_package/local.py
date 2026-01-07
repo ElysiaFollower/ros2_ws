@@ -16,6 +16,7 @@ import threading
 
 # Import Planner
 from pubsub_package.planner.dwa import DWA
+from pubsub_package.param_panel import ParamSpec, ParamWebPanel
 
 class LocalPlanner(Node):
     def __init__(self):

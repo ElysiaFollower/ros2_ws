@@ -36,3 +36,25 @@
 
 10、WSL(ROS2) 仿真：
    - 编译后：ros2 launch pubsub_package sim2d.launch.py real:=false
+
+10、在 RViz 显示“膨胀图”（不依赖 Nav2 costmap）：
+   - 启动 global_pub 时开启膨胀图发布（默认开启），topic 为 /course_agv/inflated_map
+   - RViz2 中 Add -> Map，Topic 选择 /course_agv/inflated_map
+   - 可调参数：robot_radius（机器人半径）、inflation_radius（额外膨胀距离）
+
+11、实时参数控制面板（Ubuntu/WSL 浏览器打开，实时调整下次规划/控制使用的参数）：
+   - global_pub：ros2 run pubsub_package global_pub --ros-args -p enable_param_panel:=true
+     浏览器访问：http://127.0.0.1:8891/
+   - local_pub：ros2 run pubsub_package local_pub --ros-args -p real:=true -p enable_param_panel:=true
+     浏览器访问：http://127.0.0.1:8890/
+   - 可选自动打开浏览器：加参数 -p param_panel_open_browser:=true
+   - 改端口/绑定地址：-p param_panel_port:=889X -p param_panel_host:=127.0.0.1
+
+12、Windows 无 ROS2 仿真增强版（单面板：点选起终点 + 同时调 global/local 参数 + 自动绘制路径/轨迹）：
+   12.1 PowerShell 运行（推荐）：
+   - $env:PYTHONPATH=(Resolve-Path pubsub_package).Path
+   - python -m pubsub_package.sim_no_ros_panel --map .\\pubsub_package\\maps\\simple_map.yaml --open-browser
+   12.2 操作说明：
+   - 左键点击地图：设置 start（起点），右键点击地图：设置 goal（终点）
+   - 点击 Run：运行一次 “RRT* 全局 + DWA 局部闭环”，自动画出蓝色全局路径与红色轨迹
+   - 在右侧参数栏修改参数后再次 Run：参数会作用于下一次规划/控制

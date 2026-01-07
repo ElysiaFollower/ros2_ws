@@ -56,6 +56,12 @@ class GlobalPlanner(Node):
         raw_data = np.array(msg.data, dtype=np.int8).reshape(msg.info.height, msg.info.width)
         self.map_data = raw_data
 
+        if self.publish_inflated_map:
+            try:
+                self._publish_inflated_map()
+            except Exception as e:
+                self.get_logger().error(f"Inflated map publish error: {e}")
+
     def goal_callback(self, msg):
         self.current_goal = msg
         self.get_logger().info(f"[Global] New Goal: ({msg.pose.position.x:.2f}, {msg.pose.position.y:.2f})")

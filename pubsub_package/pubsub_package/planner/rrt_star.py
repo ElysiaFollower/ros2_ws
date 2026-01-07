@@ -214,6 +214,9 @@ class RRT_star:
     def _rewire(self, new_node, near_inds):
         for i in near_inds:
             near_node = self.node_list[i]
+            # 跳过新节点本身（避免自引用）
+            if near_node is new_node:
+                continue
             edge_node = self._steer(new_node, near_node)
             if not edge_node: continue
             
