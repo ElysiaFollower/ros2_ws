@@ -3,248 +3,58 @@
 
 import rclpy
 from rclpy.node import Node
+from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
 from tf2_ros import TransformListener, Buffer
-from nav_msgs.srv import GetMap
 from nav_msgs.msg import Path, OccupancyGrid
 from geometry_msgs.msg import PoseStamped
-from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
-from rclpy.parameter import SetParametersResult
-
 import numpy as np
-import sys
-import time
 import math
-# import your own planner
-from pubsub_package.planner.rrt_star import RRT_star as planner
-from pubsub_package.param_panel import ParamSpec, ParamWebPanel
+import time
 
+# Import the refactored planner
+from pubsub_package.planner.rrt_star import RRT_star
 
 class GlobalPlanner(Node):
     def __init__(self):
         super().__init__('global_planner')
-        self.declare_parameter('enable_param_panel', False)
-        self.declare_parameter('param_panel_host', '127.0.0.1')
-        self.declare_parameter('param_panel_port', 8891)
-        self.declare_parameter('param_panel_open_browser', False)
-
+        
+        # Parameters
         self.declare_parameter('map_frame', 'map')
         self.declare_parameter('base_frame', 'base_footprint')
-        self.declare_parameter('log_interval_sec', 1.0)
-        self.declare_parameter('verbose_log', True)
-        self.declare_parameter('robot_radius', 0.2)
-        self.declare_parameter('inflation_radius', 0.1)
-        self.declare_parameter('publish_inflated_map', True)
-        self.declare_parameter('inflated_map_topic', '/course_agv/inflated_map')
+        self.declare_parameter('robot_radius', 0.01)
+        self.declare_parameter('inflation_radius', 0.05)
+        
+        self.map_frame = self.get_parameter('map_frame').value
+        self.base_frame = self.get_parameter('base_frame').value
+        self.robot_radius = self.get_parameter('robot_radius').value
+        self.inflation_radius = self.get_parameter('inflation_radius').value
 
-        self.declare_parameter('rrt.expand_dis', 0.5)
-        self.declare_parameter('rrt.path_resolution', 0.05)
-        self.declare_parameter('rrt.goal_sample_rate', 10)
-        self.declare_parameter('rrt.max_iter', 5000)
-        self.declare_parameter('rrt.connect_circle_dist', 2.0)
-        self.declare_parameter('rrt.search_until_max_iter', False)
-        self.declare_parameter('rrt.smooth_iter', 200)
-        self.declare_parameter('rrt.attempts', 10)
-
-        self.map_frame = str(self.get_parameter('map_frame').value)
-        self.base_frame = str(self.get_parameter('base_frame').value)
-        self.log_interval_sec = float(self.get_parameter('log_interval_sec').value)
-        self.verbose_log = bool(self.get_parameter('verbose_log').value)
-        self._last_log_time = 0.0
-
-        self.plan_robot_radius = float(self.get_parameter('robot_radius').value)
-        self.inflation_radius = float(self.get_parameter('inflation_radius').value)
-        self.publish_inflated_map = bool(self.get_parameter('publish_inflated_map').value)
-        self.inflated_map_topic = str(self.get_parameter('inflated_map_topic').value)
-        self.plan_ox = []  # obstacle
-        self.plan_oy = []
-        self.plan_sx = 0.0  # start pose
-        self.plan_sy = 0.0
-        self.plan_gx = 0.0  # goal pose
-        self.plan_gy = 0.0
-        self.plan_rx = []  # plan
-        self.plan_ry = []
-
-        self._last_map_time = 0.0
-        self._last_goal_time = 0.0
-        self._last_plan_time = 0.0
-        self._last_inflated_publish_time = 0.0
-        self._last_plan_ok: bool | None = None
-        self._last_plan_msg = ""
-
+        # TF
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self)
 
-        self.map_sub = self.create_subscription(OccupancyGrid, '/map', self.map_callback, 1)
-        self.goal_sub = self.create_subscription(PoseStamped, '/course_agv/goal', self.goal_callback, 1)
-        self.path_pub = self.create_publisher(Path, '/course_agv/global_path', 1)
+        # Communication
+        # Transient Local QoS for Map is critical
+        qos_map = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL, reliability=ReliabilityPolicy.RELIABLE)
+        self.map_sub = self.create_subscription(OccupancyGrid, '/map', self.map_callback, qos_map)
+        self.goal_sub = self.create_subscription(PoseStamped, '/course_agv/goal', self.goal_callback, 10)
+        self.path_pub = self.create_publisher(Path, '/course_agv/global_path', 10)
 
-        map_qos = QoSProfile(
-            history=HistoryPolicy.KEEP_LAST,
-            depth=1,
-            reliability=ReliabilityPolicy.RELIABLE,
-            durability=DurabilityPolicy.TRANSIENT_LOCAL,
-        )
-        self.inflated_map_pub = self.create_publisher(
-            OccupancyGrid,
-            self.inflated_map_topic,
-            map_qos,
-        )
-        # Note: Service-based planning is disabled, using subscription-based approach instead
-        # self.plan_srv = self.create_service(Plan, '/course_agv/global_plan', self.replan)
+        # State
+        self.map_data = None
+        self.map_info = None
+        self.current_goal = None
 
-        self._param_sync_needed = True
-        self.add_on_set_parameters_callback(self._on_set_parameters)
-
-        self._param_panel: ParamWebPanel | None = None
-        if bool(self.get_parameter('enable_param_panel').value):
-            self._start_param_panel()
-        self._param_panel_timer = self.create_timer(0.2, self._param_panel_tick)
-        self._status_timer = self.create_timer(0.2, self._status_tick)
-
-        self.get_logger().info(
-            "GlobalPlanner started: "
-            f"map_frame={self.map_frame} base_frame={self.base_frame} "
-            f"publish_inflated_map={self.publish_inflated_map} inflated_map_topic={self.inflated_map_topic} "
-            f"robot_radius={self.plan_robot_radius:.3f} inflation_radius={self.inflation_radius:.3f} "
-            f"log_interval_sec={self.log_interval_sec:.2f} verbose_log={self.verbose_log}"
-        )
-
-    def _on_set_parameters(self, params):
-        for p in params:
-            if p.name in ('map_frame', 'base_frame'):
-                if not str(p.value).strip():
-                    return SetParametersResult(successful=False, reason=f"{p.name} cannot be empty")
-            if p.name in ('robot_radius', 'inflation_radius'):
-                if float(p.value) < 0.0:
-                    return SetParametersResult(successful=False, reason=f"{p.name} must be >= 0")
-            if p.name.startswith('rrt.'):
-                if p.name in ('rrt.max_iter', 'rrt.goal_sample_rate', 'rrt.attempts', 'rrt.smooth_iter') and int(p.value) < 1:
-                    return SetParametersResult(successful=False, reason=f"{p.name} must be >= 1")
-                if p.name in ('rrt.expand_dis', 'rrt.path_resolution', 'rrt.connect_circle_dist') and float(p.value) <= 0.0:
-                    return SetParametersResult(successful=False, reason=f"{p.name} must be > 0")
-        self._param_sync_needed = True
-        return SetParametersResult(successful=True)
-
-    def _sync_params(self) -> None:
-        self.map_frame = str(self.get_parameter('map_frame').value)
-        self.base_frame = str(self.get_parameter('base_frame').value)
-        self.log_interval_sec = float(self.get_parameter('log_interval_sec').value)
-        self.verbose_log = bool(self.get_parameter('verbose_log').value)
-
-        self.plan_robot_radius = float(self.get_parameter('robot_radius').value)
-        self.inflation_radius = float(self.get_parameter('inflation_radius').value)
-        self.publish_inflated_map = bool(self.get_parameter('publish_inflated_map').value)
-        self.inflated_map_topic = str(self.get_parameter('inflated_map_topic').value)
-        self._param_sync_needed = False
-
-    def _status_tick(self) -> None:
-        if not self.verbose_log:
-            return
-        now = time.time()
-        if now - self._last_log_time < max(self.log_interval_sec, 0.1):
-            return
-        self._last_log_time = now
-
-        have_map = hasattr(self, "map")
-        map_age = (now - self._last_map_time) if self._last_map_time > 0 else float("inf")
-        goal_age = (now - self._last_goal_time) if self._last_goal_time > 0 else float("inf")
-        plan_age = (now - self._last_plan_time) if self._last_plan_time > 0 else float("inf")
-        infl_age = (now - self._last_inflated_publish_time) if self._last_inflated_publish_time > 0 else float("inf")
-
-        path_len = int(len(getattr(self, "plan_rx", []) or []))
-        plan_ok = self._last_plan_ok
-        plan_state = "unknown" if plan_ok is None else ("ok" if plan_ok else "fail")
-        msg = self._last_plan_msg
-
-        if have_map:
-            w = int(self.map.info.width)
-            h = int(self.map.info.height)
-            res = float(self.map.info.resolution)
-            self.get_logger().info(
-                f"status: map=({w}x{h}) res={res:.3f} map_age={map_age:.1f}s "
-                f"goal=({self.plan_gx:.2f},{self.plan_gy:.2f}) goal_age={goal_age:.1f}s "
-                f"start=({self.plan_sx:.2f},{self.plan_sy:.2f}) "
-                f"plan={plan_state} path_len={path_len} plan_age={plan_age:.1f}s "
-                f"inflated_pub_age={infl_age:.1f}s topic={self.inflated_map_topic} {msg}"
-            )
-        else:
-            self.get_logger().info(
-                f"status: waiting for /map... goal_age={goal_age:.1f}s plan={plan_state} {msg}"
-            )
-
-    def _param_panel_specs(self) -> dict[str, ParamSpec]:
-        return {
-            'map_frame': ParamSpec('map_frame', 'str', help='TF map frame'),
-            'base_frame': ParamSpec('base_frame', 'str', help='TF base frame'),
-            'robot_radius': ParamSpec('robot_radius', 'float', min=0.05, max=0.6, step=0.01, help='Robot radius (m)'),
-            'inflation_radius': ParamSpec('inflation_radius', 'float', min=0.0, max=0.6, step=0.01, help='Extra inflation (m)'),
-            'publish_inflated_map': ParamSpec('publish_inflated_map', 'bool', help='Publish inflated OccupancyGrid'),
-            'log_interval_sec': ParamSpec('log_interval_sec', 'float', min=0.1, max=10.0, step=0.1, help='Log throttle (s)'),
-            'rrt.expand_dis': ParamSpec('rrt.expand_dis', 'float', min=0.05, max=3.0, step=0.05, help='RRT* step length (m)'),
-            'rrt.path_resolution': ParamSpec('rrt.path_resolution', 'float', min=0.01, max=0.5, step=0.01, help='RRT* interpolation (m)'),
-            'rrt.goal_sample_rate': ParamSpec('rrt.goal_sample_rate', 'int', min=0, max=100, step=1, help='Goal bias (%)'),
-            'rrt.max_iter': ParamSpec('rrt.max_iter', 'int', min=100, max=20000, step=100, help='Max iterations'),
-            'rrt.connect_circle_dist': ParamSpec('rrt.connect_circle_dist', 'float', min=0.5, max=10.0, step=0.1, help='Rewire radius base'),
-            'rrt.search_until_max_iter': ParamSpec('rrt.search_until_max_iter', 'bool', help='Search until max_iter'),
-            'rrt.smooth_iter': ParamSpec('rrt.smooth_iter', 'int', min=0, max=5000, step=50, help='Smoothing iterations'),
-            'rrt.attempts': ParamSpec('rrt.attempts', 'int', min=1, max=50, step=1, help='Replan attempts'),
-        }
-
-    def _start_param_panel(self) -> None:
-        host = str(self.get_parameter('param_panel_host').value)
-        port = int(self.get_parameter('param_panel_port').value)
-        open_browser = bool(self.get_parameter('param_panel_open_browser').value)
-        self._param_panel = ParamWebPanel(
-            self,
-            title="Global Planner Parameter Panel",
-            host=host,
-            port=port,
-            specs=self._param_panel_specs(),
-            open_browser=open_browser,
-        )
-        self._param_panel.start()
-
-    def _param_panel_tick(self) -> None:
-        if self._param_panel is not None:
-            updates = self._param_panel.drain_updates()
-            if updates:
-                ok = self._param_panel.apply_updates(updates)
-                if ok:
-                    self.get_logger().info(f"Applied params: {sorted(updates.keys())}")
-
-        if self._param_sync_needed:
-            self._sync_params()
-
-    def update_map(self):
-        """Request map from map server via service (alternative to subscription).
-
-        Note: This method is currently not used as map is received via subscription.
-        Kept for potential future use.
-        """
-        client = self.create_client(GetMap, '/static_map')
-        while not client.wait_for_service(timeout_sec=1.0):
-            self.get_logger().info('Waiting for /static_map service...')
-        try:
-            request = GetMap.Request()
-            future = client.call_async(request)
-            rclpy.spin_until_future_complete(self, future)
-            if future.result():
-                self.map_callback(future.result().map)
-            else:
-                self.get_logger().error('Failed to get map')
-        except Exception as e:
-            self.get_logger().error(f'Service call failed: {e}')
+        self.get_logger().info(">>> Global Planner Ready. Waiting for Map...")
 
     def map_callback(self, msg):
-        self.map = msg
-        self._last_map_time = time.time()
-        now = time.time()
-        if now - self._last_log_time >= max(self.log_interval_sec, 0.1):
-            self._last_log_time = now
-            self.get_logger().info(
-                f"Received /map: size=({msg.info.width}x{msg.info.height}) res={msg.info.resolution:.3f} "
-                f"origin=({msg.info.origin.position.x:.2f},{msg.info.origin.position.y:.2f})"
-            )
+        self.get_logger().info(f"[Global] Map Received: {msg.info.width}x{msg.info.height}, Res: {msg.info.resolution}")
+        self.map_info = msg.info
+        
+        # Convert to numpy array for fast access
+        # Data is row-major
+        raw_data = np.array(msg.data, dtype=np.int8).reshape(msg.info.height, msg.info.width)
+        self.map_data = raw_data
 
         if self.publish_inflated_map:
             try:
@@ -253,242 +63,116 @@ class GlobalPlanner(Node):
                 self.get_logger().error(f"Inflated map publish error: {e}")
 
     def goal_callback(self, msg):
-        self.plan_gx = msg.pose.position.x
-        self.plan_gy = msg.pose.position.y
-        self._last_goal_time = time.time()
-        self.get_logger().info(
-            f"Received new goal: ({self.plan_gx:.3f},{self.plan_gy:.3f}) frame={msg.header.frame_id or self.map_frame}"
-        )
-        self.replan()
+        self.current_goal = msg
+        self.get_logger().info(f"[Global] New Goal: ({msg.pose.position.x:.2f}, {msg.pose.position.y:.2f})")
+        self.plan_path()
 
-    def replan(self):
-        t0 = time.time()
-        self.get_logger().info('Replanning...')
-        if not hasattr(self, "map"):
-            self.get_logger().warning("No /map received yet, skipping planning")
-            self._last_plan_ok = False
-            self._last_plan_msg = "no_map"
-            return
-        if self._param_sync_needed:
-            self._sync_params()
-        self.init_planner()
-        self.update_global_pose()
-
-        res = False
-        attempt = int(self.get_parameter('rrt.attempts').value)
-        last_reason = ""
-        for k in range(attempt):
-            is_found, path = self.planner.plan(self.plan_sx, self.plan_sy, self.plan_gx, self.plan_gy)
-            if is_found:
-                path = self.simplify_path(path, min_dist=self.map.info.resolution * 0.5)
-                if hasattr(self.planner, "smooth_path"):
-                    smooth_iter = int(self.get_parameter('rrt.smooth_iter').value)
-                    if smooth_iter > 0:
-                        path = self.planner.smooth_path(path, max_iter=smooth_iter)
-                path = self.simplify_path(path, min_dist=self.map.info.resolution * 0.5)
-                plan_path = self.insert_midpoints(path)
-                self.plan_rx = np.array(plan_path)[:, 0]
-                self.plan_ry = np.array(plan_path)[:, 1]
-                self.publish_path()
-                res = True
-                self._last_plan_ok = True
-                self._last_plan_time = time.time()
-                self._last_plan_msg = f"attempt={k+1}/{attempt} dt={(self._last_plan_time - t0):.3f}s"
-                self.get_logger().info(
-                    f"Path found: raw_len={len(path)}, published_len={len(self.plan_rx)} "
-                    f"start=({self.plan_sx:.2f},{self.plan_sy:.2f}) goal=({self.plan_gx:.2f},{self.plan_gy:.2f})"
-                )
-                break
-            else:
-                last_reason = f"attempt={k+1}/{attempt}"
-                self.get_logger().info(f"Retry... ({last_reason})")
-
-        if not res:
-            self.get_logger().error("Path not found!")
-            self._last_plan_ok = False
-            self._last_plan_time = time.time()
-            self._last_plan_msg = f"{last_reason} dt={(self._last_plan_time - t0):.3f}s"
-
-
-
-    @staticmethod
-    def simplify_path(path, min_dist=0.05):
-        if not path:
-            return []
-        out = [path[0]]
-        last_x, last_y = float(path[0][0]), float(path[0][1])
-        for p in path[1:]:
-            x, y = float(p[0]), float(p[1])
-            if math.hypot(x - last_x, y - last_y) >= min_dist:
-                out.append([x, y])
-                last_x, last_y = x, y
-        if len(out) == 1 and len(path) > 1:
-            out.append([float(path[-1][0]), float(path[-1][1])])
-        return out
-
-    def insert_midpoints(self, path):
-        plan_path = []
-        for i in range(len(path) - 1):
-            plan_path.append(path[i])
-            x, y = path[i]
-            dx = path[i + 1][0] - x
-            dy = path[i + 1][1] - y
-            angle = math.atan2(dy, dx)
-            dist = math.hypot(dx, dy)
-            step_size = self.plan_robot_radius
-            steps = int(round(dist / step_size))
-            for _ in range(steps - 1):
-                x += step_size * math.cos(angle)
-                y += step_size * math.sin(angle)
-                plan_path.append((x, y))
-        plan_path.append(path[-1])
-        return plan_path
-
-    @staticmethod
-    def inflate_obstacles(occ_grid: np.ndarray, radius_cells: int) -> np.ndarray:
-        """Inflate occupancy grid (binary) by a circular radius in cells.
-
-        Args:
-            occ_grid: bool array, True means occupied
-            radius_cells: inflation radius in grid cells
-
-        Returns:
-            Inflated bool array
-        """
-        r = int(max(radius_cells, 0))
-        if r == 0:
-            return occ_grid
-
-        inflated = np.zeros_like(occ_grid, dtype=bool)
-        offsets = []
-        r2 = r * r
-        for dy in range(-r, r + 1):
-            for dx in range(-r, r + 1):
-                if dx * dx + dy * dy <= r2:
-                    offsets.append((dy, dx))
-
-        rows, cols = occ_grid.shape
-        for dy, dx in offsets:
-            src_r0 = max(0, -dy)
-            src_r1 = min(rows, rows - dy)
-            src_c0 = max(0, -dx)
-            src_c1 = min(cols, cols - dx)
-
-            dst_r0 = src_r0 + dy
-            dst_r1 = src_r1 + dy
-            dst_c0 = src_c0 + dx
-            dst_c1 = src_c1 + dx
-
-            inflated[dst_r0:dst_r1, dst_c0:dst_c1] |= occ_grid[src_r0:src_r1, src_c0:src_c1]
-
-        return inflated
-
-    def _publish_inflated_map(self) -> None:
-        if not hasattr(self, "map"):
-            return
-
-        h = int(self.map.info.height)
-        w = int(self.map.info.width)
-        resolution = float(self.map.info.resolution)
-
-        map_raw = np.array(self.map.data, dtype=np.int16).reshape((h, w))
-        occ = map_raw >= 50
-
-        inflation_cells = int(math.ceil(max(self.plan_robot_radius + self.inflation_radius, 0.0) / max(resolution, 1e-6)))
-        occ_inflated = self.inflate_obstacles(occ, inflation_cells)
-
-        out = OccupancyGrid()
-        out.header.stamp = rclpy.time.Time().to_msg()
-        out.header.frame_id = self.map_frame
-        out.info = self.map.info
-
-        out_data = map_raw.copy()
-        out_data[occ_inflated] = 100
-        out.data = out_data.astype(np.int8).ravel(order="C").tolist()
-        self.inflated_map_pub.publish(out)
-        self._last_inflated_publish_time = time.time()
-
-    def init_planner(self):
-      
-        h = int(self.map.info.height)
-        w = int(self.map.info.width)
-        map_raw = np.array(self.map.data).reshape((h, w))
-      
-        minx = self.map.info.origin.position.x
-        maxx = self.map.info.origin.position.x + w * self.map.info.resolution
-        miny = self.map.info.origin.position.y
-        maxy = self.map.info.origin.position.y + h * self.map.info.resolution
-      
-        resolution = float(self.map.info.resolution)
-        occ = map_raw != 0  # treat unknown as occupied for safety
-        inflation_cells = int(math.ceil(max(self.plan_robot_radius + self.inflation_radius, 0.0) / max(resolution, 1e-6)))
-        occ_inflated = self.inflate_obstacles(occ, inflation_cells)
-
-        oy, ox = np.nonzero(occ_inflated)  # y, x
-    
-        self.plan_ox = ox * self.map.info.resolution + self.map.info.origin.position.x
-        self.plan_oy = oy * self.map.info.resolution + self.map.info.origin.position.y
-        obstacles = list(zip(self.plan_ox, self.plan_oy))
-        obstacles.append((-9999, -9999))
-        self.get_logger().info(
-            f"Planner init: bounds=({minx:.2f},{miny:.2f})-({maxx:.2f},{maxy:.2f}) obstacles={len(obstacles)} "
-            f"robot_radius={self.plan_robot_radius:.2f} inflation={self.inflation_radius:.2f} (cells={inflation_cells})"
-        )
-        self.planner = planner(
-            minx=minx,
-            maxx=maxx,
-            miny=miny,
-            maxy=maxy,
-            obstacles=obstacles,
-            robot_size=self.plan_robot_radius,
-            safe_dist=self.map.info.resolution,
-            expand_dis=float(self.get_parameter('rrt.expand_dis').value),
-            path_resolution=float(self.get_parameter('rrt.path_resolution').value),
-            goal_sample_rate=int(self.get_parameter('rrt.goal_sample_rate').value),
-            max_iter=int(self.get_parameter('rrt.max_iter').value),
-            connect_circle_dist=float(self.get_parameter('rrt.connect_circle_dist').value),
-            search_until_max_iter=bool(self.get_parameter('rrt.search_until_max_iter').value),
-        )
-
-    def update_global_pose(self):
+    def get_robot_pose(self):
         try:
-          
             trans = self.tf_buffer.lookup_transform(
-                self.map_frame,
-                self.base_frame,
+                self.map_frame, 
+                self.base_frame, 
                 rclpy.time.Time(),
-                rclpy.duration.Duration(seconds=4.0),
+                rclpy.duration.Duration(seconds=1.0)
             )
-            
-            self.plan_sx = trans.transform.translation.x
-            self.plan_sy = trans.transform.translation.y
+            return trans.transform.translation.x, trans.transform.translation.y
         except Exception as e:
-            self.get_logger().error(f"TF error: {e}")
+            self.get_logger().error(f"[Global] TF Error (Map->Base): {e}")
+            return None
 
-    def publish_path(self):
-        path = Path()
-        path.header.stamp = rclpy.time.Time().to_msg()
-        path.header.frame_id = self.map_frame
-        for i in range(len(self.plan_rx)):
-            pose = PoseStamped()
-            pose.header.stamp = rclpy.time.Time().to_msg()
-            pose.header.frame_id = self.map_frame
-            pose.pose.position.x = self.plan_rx[i]
-            pose.pose.position.y = self.plan_ry[i]
-            pose.pose.position.z = 0.01
-            pose.pose.orientation.w = 1.0
-            path.poses.append(pose)
-        self.path_pub.publish(path)
+    @staticmethod
+    def interpolate_path(path, step_size=0.1):
+        """
+        Interpolate sparse path points to create a dense path.
+        Args:
+            path: [[x1, y1], [x2, y2], ...]
+            step_size: interpolation interval (m)
+        """
+        if len(path) < 2:
+            return path
+            
+        dense_path = []
+        for i in range(len(path) - 1):
+            p1 = np.array(path[i])
+            p2 = np.array(path[i+1])
+            dist = np.linalg.norm(p2 - p1)
+            
+            num_steps = int(math.ceil(dist / step_size))
+            if num_steps == 0: num_steps = 1
+            
+            for j in range(num_steps):
+                t = j / num_steps
+                pt = p1 + (p2 - p1) * t
+                dense_path.append(pt.tolist())
         
+        dense_path.append(path[-1])
+        return dense_path
 
+    def plan_path(self):
+        if self.map_data is None:
+            self.get_logger().warn("[Global] Cannot plan: No Map data yet.")
+            return
+
+        start_pose = self.get_robot_pose()
+        if start_pose is None:
+            return
+
+        sx, sy = start_pose
+        gx, gy = self.current_goal.pose.position.x, self.current_goal.pose.position.y
+
+        # Initialize RRT* with grid map
+        planner = RRT_star(
+            grid_map=self.map_data,
+            resolution=self.map_info.resolution,
+            origin_x=self.map_info.origin.position.x,
+            origin_y=self.map_info.origin.position.y,
+            robot_radius=self.robot_radius,
+            safe_dist=self.inflation_radius,
+            expand_dis=1.0, # Increased for speed
+            max_iter=2000   # Reduced for speed (was 5000)
+        )
+
+        self.get_logger().info(f"[Global] Start RRT*: ({sx:.2f},{sy:.2f}) -> ({gx:.2f},{gy:.2f})")
+        start_time = time.time()
+        
+        try:
+            found, path = planner.plan(sx, sy, gx, gy)
+        except Exception as e:
+            self.get_logger().error(f"[Global] RRT* Exception: {e}")
+            return
+        
+        if found:
+            # 1. Smooth the path (removes unnecessary waypoints)
+            path = planner.smooth_path(path)
+            # 2. Interpolate (adds dense points back) - FIXES PATH LEN: 2 ISSUE
+            path = self.interpolate_path(path, step_size=0.05)
+            
+            self.publish_path(path)
+            duration = time.time() - start_time
+            self.get_logger().info(f"[Global] Success! Path len: {len(path)}. Time: {duration:.3f}s")
+        else:
+            self.get_logger().error("[Global] Path Not Found!")
+
+    def publish_path(self, points):
+        path_msg = Path()
+        path_msg.header.stamp = self.get_clock().now().to_msg()
+        path_msg.header.frame_id = self.map_frame
+        
+        for pt in points:
+            pose = PoseStamped()
+            pose.header = path_msg.header
+            pose.pose.position.x = pt[0]
+            pose.pose.position.y = pt[1]
+            # Lift path slightly so it shows above the map in RViz
+            pose.pose.position.z = 0.1 
+            pose.pose.orientation.w = 1.0
+            path_msg.poses.append(pose)
+            
+        self.path_pub.publish(path_msg)
 
 def main(args=None):
     rclpy.init(args=args)
-    global_planner = GlobalPlanner()
-    rclpy.spin(global_planner)
-    global_planner.destroy_node()
+    node = GlobalPlanner()
+    rclpy.spin(node)
+    node.destroy_node()
     rclpy.shutdown()
-
-
-if __name__ == '__main__':
-    main()
