@@ -49,3 +49,12 @@
      浏览器访问：http://127.0.0.1:8890/
    - 可选自动打开浏览器：加参数 -p param_panel_open_browser:=true
    - 改端口/绑定地址：-p param_panel_port:=889X -p param_panel_host:=127.0.0.1
+
+12、Windows 无 ROS2 仿真增强版（单面板：点选起终点 + 同时调 global/local 参数 + 自动绘制路径/轨迹）：
+   12.1 PowerShell 运行（推荐）：
+   - $env:PYTHONPATH=(Resolve-Path pubsub_package).Path
+   - python -m pubsub_package.sim_no_ros_panel --map .\\pubsub_package\\maps\\simple_map.yaml --open-browser
+   12.2 操作说明：
+   - 左键点击地图：设置 start（起点），右键点击地图：设置 goal（终点）
+   - 点击 Run：运行一次 “RRT* 全局 + DWA 局部闭环”，自动画出蓝色全局路径与红色轨迹
+   - 在右侧参数栏修改参数后再次 Run：参数会作用于下一次规划/控制
