@@ -21,8 +21,11 @@ class GlobalPlanner(Node):
         super().__init__('global_planner')
         self.declare_parameter('map_frame', 'map')
         self.declare_parameter('base_frame', 'base_footprint')
+        self.declare_parameter('log_interval_sec', 1.0)
         self.map_frame = str(self.get_parameter('map_frame').value)
         self.base_frame = str(self.get_parameter('base_frame').value)
+        self.log_interval_sec = float(self.get_parameter('log_interval_sec').value)
+        self._last_log_time = 0.0
 
         self.plan_robot_radius = 0.15
         self.plan_ox = []  # obstacle
@@ -65,11 +68,20 @@ class GlobalPlanner(Node):
 
     def map_callback(self, msg):
         self.map = msg
+        now = time.time()
+        if now - self._last_log_time >= max(self.log_interval_sec, 0.1):
+            self._last_log_time = now
+            self.get_logger().info(
+                f"Received /map: size=({msg.info.width}x{msg.info.height}) res={msg.info.resolution:.3f} "
+                f"origin=({msg.info.origin.position.x:.2f},{msg.info.origin.position.y:.2f})"
+            )
 
     def goal_callback(self, msg):
         self.plan_gx = msg.pose.position.x
         self.plan_gy = msg.pose.position.y
-        self.get_logger().info("Received new goal!")
+        self.get_logger().info(
+            f"Received new goal: ({self.plan_gx:.3f},{self.plan_gy:.3f}) frame={msg.header.frame_id or self.map_frame}"
+        )
         self.replan()
 
     def replan(self):
@@ -94,7 +106,10 @@ class GlobalPlanner(Node):
                 self.plan_ry = np.array(plan_path)[:, 1]
                 self.publish_path()
                 res = True
-                self.get_logger().info("Path found!")
+                self.get_logger().info(
+                    f"Path found: raw_len={len(path)}, published_len={len(self.plan_rx)} "
+                    f"start=({self.plan_sx:.2f},{self.plan_sy:.2f}) goal=({self.plan_gx:.2f},{self.plan_gy:.2f})"
+                )
                 break
             else:
                 self.get_logger().info("Retry...")
@@ -152,6 +167,10 @@ class GlobalPlanner(Node):
         self.plan_oy = oy * self.map.info.resolution + self.map.info.origin.position.y
         obstacles = list(zip(self.plan_ox, self.plan_oy))
         obstacles.append((-9999, -9999))
+        self.get_logger().info(
+            f"Planner init: bounds=({minx:.2f},{miny:.2f})-({maxx:.2f},{maxy:.2f}) obstacles={len(obstacles)} "
+            f"robot_radius={self.plan_robot_radius:.2f}"
+        )
         self.planner = planner(minx=minx, maxx=maxx, miny=miny, maxy=maxy, obstacles=obstacles,
                                robot_size=self.plan_robot_radius, safe_dist=self.map.info.resolution)
 

@@ -27,6 +27,7 @@ class LocalPlanner(Node):
         self.declare_parameter('controller_frequency', 10.0)
         self.declare_parameter('rotate_to_goal', True)
         self.declare_parameter('yaw_goal_tolerance', 0.3)
+        self.declare_parameter('log_interval_sec', 1.0)
         self.declare_parameter('dwa.to_goal_cost_gain', 0.5)
         self.declare_parameter('dwa.path_cost_gain', 2.0)
         self.declare_parameter('dwa.heading_cost_gain', 0.3)
@@ -81,52 +82,103 @@ class LocalPlanner(Node):
 
         self.traj_pub = self.create_publisher(Path, '/course_agv/trajectory', 1)
         self.traj = Path()
-        self.traj.header.frame_id = 'map'
+        self.traj.header.frame_id = self.map_frame
 
         self.lookahead_dist = float(self.get_parameter('lookahead_dist').value)
         self.local_path_max_points = int(self.get_parameter('local_path_max_points').value)
         self.controller_frequency = float(self.get_parameter('controller_frequency').value)
         self.rotate_to_goal = bool(self.get_parameter('rotate_to_goal').value)
         self.yaw_goal_tolerance = float(self.get_parameter('yaw_goal_tolerance').value)
+        self.log_interval_sec = float(self.get_parameter('log_interval_sec').value)
         self.plan_path_points = []
+
+        self._active = False
+        self._path_version = 0
+        self._last_seen_path_version = -1
+        self._last_log_time = 0.0
 
     def path_callback(self, msg):
         self.lock.acquire()
         self.path = msg
+        self._path_version += 1
+        self._active = True
         self.update_global_pose(init=True)
         self.lock.release()
+
+        goal = msg.poses[-1].pose.position if msg.poses else None
+        if goal is not None:
+            self.get_logger().info(
+                f"Received global_path: poses={len(msg.poses)}, goal=({goal.x:.3f},{goal.y:.3f}), "
+                f"frames(map={self.map_frame}, base={self.base_frame})"
+            )
+
         if self.planning_thread is None:
-            self.planning_thread = Thread(target=self.plan_thread_func)
+            self.planning_thread = Thread(target=self.plan_thread_func, daemon=True)
             self.planning_thread.start()
 
     def plan_thread_func(self):
-        self.get_logger().info("Running planning thread!")
-        while True:
+        self.get_logger().info("Planning loop started (waits for paths and supports multiple goals).")
+        while rclpy.ok():
+            sleep_dt = 1.0 / max(self.controller_frequency, 1.0)
             self.lock.acquire()
-            self.plan_once()
-            self.lock.release()
-            time.sleep(1.0 / max(self.controller_frequency, 1.0))
-            if self.goal_dis < self.arrive:
-                self.lock.acquire()
-                if self.rotate_to_goal and len(self.path.poses) >= 2:
-                    p1 = self.path.poses[-2].pose.position
-                    p2 = self.path.poses[-1].pose.position
-                    yaw_des = math.atan2(p2.y - p1.y, p2.x - p1.x)
-                    yaw_err = normalize_angle(yaw_des - self.yaw)
-                    if abs(yaw_err) > self.yaw_goal_tolerance:
-                        self.vx = 0.0
-                        self.vw = max(min(1.5 * yaw_err, self.V_W), -self.V_W)
-                        self.publish_velocity(zero=False)
-                        self.lock.release()
-                        continue
+            try:
+                if len(self.path.poses) < 2:
+                    self.lock.release()
+                    time.sleep(0.1)
+                    continue
 
-                self.publish_velocity(zero=True)
-                self.lock.release()
-                self.get_logger().info("Arrived at goal!")
-                break
-        self.planning_thread = None
-        self.get_logger().info("Exiting planning thread!")
-        self.get_logger().info("----------------------------------------------------")
+                if self._last_seen_path_version != self._path_version:
+                    self._last_seen_path_version = self._path_version
+                    self.vx = 0.0
+                    self.vw = 0.0
+                    self.get_logger().info("Switched to new path (reset controller state).")
+
+                if self.goal_dis < self.arrive:
+                    if self.rotate_to_goal and len(self.path.poses) >= 2:
+                        p1 = self.path.poses[-2].pose.position
+                        p2 = self.path.poses[-1].pose.position
+                        yaw_des = math.atan2(p2.y - p1.y, p2.x - p1.x)
+                        yaw_err = normalize_angle(yaw_des - self.yaw)
+                        if abs(yaw_err) > self.yaw_goal_tolerance:
+                            self.vx = 0.0
+                            self.vw = max(min(1.5 * yaw_err, self.V_W), -self.V_W)
+                            self.publish_velocity(zero=False)
+                            self.lock.release()
+                            time.sleep(sleep_dt)
+                            continue
+
+                    if self._active:
+                        self.publish_velocity(zero=True)
+                        self._active = False
+                        self.get_logger().info("Arrived at goal; waiting for next global_path...")
+                    self.lock.release()
+                    time.sleep(0.1)
+                    continue
+
+                if not self._active:
+                    self.lock.release()
+                    time.sleep(0.1)
+                    continue
+
+                self.plan_once()
+
+                now = time.time()
+                if now - self._last_log_time >= max(self.log_interval_sec, 0.1):
+                    self._last_log_time = now
+                    ob_n = int(getattr(self, "plan_ob", np.empty((0, 2))).shape[0])
+                    gx, gy = getattr(self, "plan_goal", (float("nan"), float("nan")))
+                    self.get_logger().info(
+                        f"state: x={self.x:.2f} y={self.y:.2f} yaw={self.yaw:.2f} "
+                        f"goal_r=({gx:.2f},{gy:.2f}) dist={self.goal_dis:.2f} "
+                        f"ob={ob_n} cmd(v={self.vx:.2f}, w={self.vw:.2f})"
+                    )
+            except Exception as e:
+                self.get_logger().error(f"Planning loop error: {e}")
+            finally:
+                if self.lock.locked():
+                    self.lock.release()
+            time.sleep(sleep_dt)
+        self.get_logger().info("Planning loop stopped.")
 
     def plan_once(self):
         self.update_global_pose(init=False)
@@ -158,7 +210,7 @@ class LocalPlanner(Node):
                 f"velocity: {velocity}"
             )
         
-        self.get_logger().info(f"v: {self.vx}, w: {self.vw}")
+        self.get_logger().debug(f"cmd: v={self.vx:.3f}, w={self.vw:.3f}")
         self.publish_velocity(zero=False)
 
 
